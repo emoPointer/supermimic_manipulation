@@ -218,6 +218,11 @@ class DrawerMDP(RigidObjectMDP):
         place = torch.exp(-10 * (local - place_target).norm(dim=-1))
         close = 1 - torch.tanh(10 * slide.abs())
         progress = torch.where(stage == 0, lift, torch.where(stage == 1, place, close))
+        # Imagination-only shaping: the native progress restarts at every stage
+        # (lift ~1 becomes place ~0.05; place ~1 becomes close ~0.14), so
+        # completing a stage lowered the reward and stopping just short of it
+        # paid more. Count completed stages so progress never drops at a stage.
+        progress = stage.clamp(0, 3) + progress
         values = {
             "reaching": reaching,
             "progress": progress,
@@ -238,6 +243,7 @@ class DrawerMDP(RigidObjectMDP):
             "grasp_radius": self.grasp_radius,
             "panel_reach": list(self.panel_reach),
             "process_fields": "stage, prefix, accomplished, references, counters and flags captured from the native sequence, then advanced analytically",
+            "imagined_progress_shaping": "completed stages plus the native stage progress, so progress never drops when a stage completes; imagination only",
         }
 
 
