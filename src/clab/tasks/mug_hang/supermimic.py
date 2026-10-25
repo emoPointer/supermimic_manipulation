@@ -36,6 +36,12 @@ class MugHangMDP(RigidObjectMDP):
     held_width = 0.003
     release_opening = 0.015
 
+    def __init__(self, *, carry_weight=0.2, **kwargs):
+        super().__init__(**kwargs)
+        if not 0 <= carry_weight < float("inf"):
+            raise ValueError("carry_weight must be finite and nonnegative")
+        self.carry_weight = float(carry_weight)
+
     def _frames(self, s, c):
         mug = self.obj(s, "position")
         mug_quat = six_to_quat(self.obj(s, "rotation"))
@@ -94,6 +100,11 @@ class MugHangMDP(RigidObjectMDP):
             self._point(mug, mug_quat, HANDLE_ANCHOR) - self._point(tree, tree_quat, HANG_TARGET)
         ).norm(dim=-1)
         threading = torch.exp(-10.0 * distance) * alignment.clamp(0, 1)
+        # Imagination-only shaping: the native threading term and its distance
+        # gradient vanish while the handle is misaligned with the bar, which is
+        # how every carry starts, so also pull the handle anchor toward the
+        # hanging target over long range (as BoxInBin's placement does).
+        carry = torch.exp(-distance)
         # Imagination-only shaping: once hung, reaching stops paying and finger
         # opening is rewarded instead.
         hung = self._hung(s1, c).detach()
@@ -104,6 +115,7 @@ class MugHangMDP(RigidObjectMDP):
             **self._costs(s, a, s1),
         }
         reward = sum(self.weights[name] * value for name, value in values.items())
+        reward = reward + self.carry_weight * carry
         reward = (reward + self.release_weight * hung * self._release_progress(s1)) * self.dt
         done = 1 - (1 - values["success"]) * (1 - self._timeout(s1))
         return reward, done
@@ -112,6 +124,8 @@ class MugHangMDP(RigidObjectMDP):
         return {
             "imagined_success": "native tree-frame envelope and handle engagement, mug translation speed below stable_linear_speed (native 0.01 m/s), both fingers opened past release_opening; no contact test",
             "imagined_release_shaping": "when hung: reaching gated off and release_weight * finger opening fraction added; imagination only",
+            "imagined_carry_shaping": "carry_weight * exp(-|handle anchor - hanging target| / 1 m) added; imagination only",
+            "carry_weight": self.carry_weight,
         }
 
 
