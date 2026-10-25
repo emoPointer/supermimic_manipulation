@@ -164,10 +164,10 @@ def make_env_cfg(*, play=False, reset_bank=None):
         sim=SimulationCfg(
             nconmax=256,
             njmax=1024,
-            # Compound fingertips against the multi-piece housing can match more
-            # than 128 contacts in one sensor; 135 was observed in training.
+            # Compound fingertips against the multi-piece housing can match many
+            # contacts in one sensor; 327 were observed once the policy acted.
             # This is sensor storage, not a change to contact forces/physics.
-            contact_sensor_maxmatch=256,
+            contact_sensor_maxmatch=1024,
             mujoco=MujocoCfg(
                 timestep=DEFAULT_ROBOT.physics_dt,
                 integrator="implicitfast",

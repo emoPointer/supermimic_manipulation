@@ -25,6 +25,11 @@ from .buffer import ReplayBuffer
 from .config import SuperMimicConfig
 from .networks import ACTOR_INPUT_NORMALIZATION
 
+# mujoco_warp OverflowType.CONTACT_MATCH: a contact sensor matched more contacts
+# than its storage. Extra matches are dropped (the sensor still reports a found
+# contact) and physics is unchanged, so it is counted rather than fatal.
+CONTACT_MATCH_OVERFLOW = 1 << 6
+
 
 @dataclass(frozen=True, kw_only=True)
 class RunConfig:
@@ -181,6 +186,7 @@ class SuperMimicRunner:
         self.max_observation_error = 0.0
         self.terminal_transitions = 0
         self.diverged_transitions = 0
+        self.contact_match_overflow_world_steps = 0
 
     def _record_reward_comparison(self, model_reward, model_done, native_reward, native_done):
         expected_shape = (self.env.num_envs,)
@@ -308,12 +314,16 @@ class SuperMimicRunner:
                     self.candidate_counts[key] += int(value.sum().item())
             overflow = self.env.sim.data.overflow
             if bool((overflow != 0).any()):
-                codes = sorted(set(overflow[overflow != 0].tolist()))
-                raise RuntimeError(
-                    f"Physics capacity overflow in {int((overflow != 0).sum())} worlds "
-                    f"(mujoco_warp OverflowType bitmasks {codes}); raise the task's "
-                    "nconmax, njmax or contact_sensor_maxmatch"
-                )
+                physics = (overflow & ~CONTACT_MATCH_OVERFLOW) != 0
+                if bool(physics.any()):
+                    codes = sorted(set(overflow[physics].tolist()))
+                    raise RuntimeError(
+                        f"Physics capacity overflow in {int(physics.sum())} worlds "
+                        f"(mujoco_warp OverflowType bitmasks {codes}); raise the task's "
+                        "nconmax or njmax"
+                    )
+                # Flags persist until the world resets, so this counts world-steps.
+                self.contact_match_overflow_world_steps += int((overflow != 0).sum())
             self.buffer.add(transition)
             self.agent.observe_transition(transition)
             self.agent.observe_actor_observation(observations["actor"])
@@ -600,6 +610,9 @@ class SuperMimicRunner:
                     {
                         "Train/learning_rate": learning_rate,
                         "Train/real_transitions": self.real_transitions,
+                        "Train/contact_match_overflow_world_steps": (
+                            self.contact_match_overflow_world_steps
+                        ),
                         "Train/wall_seconds": time.monotonic() - start,
                         "Model/native_observation_max_error": self.max_observation_error,
                         "Model/native_observation_rotation_coordinate_max_error": getattr(
