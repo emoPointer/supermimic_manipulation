@@ -100,7 +100,8 @@ BoxInBin, Lemon and MugHang add one imagination-only shaping term: once the obje
 placed, reaching stops paying and `release_weight` (0.2) × the finger opening fraction from
 the held width to the release opening is added, so holding on stops being rewarded. Square
 and Drawer already have native release terms; for Square, holding the handle stops paying once
-the nut is seated. MugHang's native threading term vanishes
+the nut is seated, and reaching keeps paying while the handle is grasped (natively it stops, so
+hovering an open gripper at the handle paid more than holding it). MugHang's native threading term vanishes
 while the handle is misaligned with the bar, so its imagination also adds a long-range pull of
 the handle toward the hanging target, `carry_weight` (0.2) × exp(−distance / 1 m). Square's
 alignment and insertion terms are 3 cm Gaussians, so its imagination likewise pulls the nut toward

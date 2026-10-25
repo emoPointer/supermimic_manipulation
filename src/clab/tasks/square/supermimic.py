@@ -158,7 +158,11 @@ class SquareMDP(RigidObjectMDP):
         valid = 1 - invalid
         seated = self._seated(s1, c).detach()
         handle = nut + quat_apply(nut_quat, nut.new_tensor(NUT_GRASP_POINT).expand_as(nut))
-        approach = (1 - grasped) * valid * (1 - seated * grasp_seen)
+        # Imagination-only: the native reaching term stops while the handle is
+        # grasped, so an open gripper hovering at the handle (0.2) paid more than
+        # holding it (handle_grasp 0.1) and the policy released at once. Keep
+        # paying reaching while grasped; it still stops once the nut is seated.
+        approach = valid * (1 - seated * grasp_seen)
         distance = (self.physical_grasp(s1, c) - handle).norm(dim=-1)
         relative = _apply_inverse(peg_quat, nut - peg)
         # acos has an infinite derivative at 1 (a level nut); stay just inside.
@@ -205,7 +209,7 @@ class SquareMDP(RigidObjectMDP):
             "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, not both fingers inside grip_band (release proxy), grasp_seen and not invalid; no support-force, penetration or contact test",
             "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band; replaces force-bearing finger contact classification",
             "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
-            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added; handle_grasp and alignment gated off once seated; imagination only",
+            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added; reaching also pays while grasped; handle_grasp and alignment gated off once seated; imagination only",
             "carry_weight": self.carry_weight,
             "grip_band": list(self.grip_band),
             "criteria": vars(self.criteria),
