@@ -22,15 +22,18 @@ def load_policy(
         config.cuda_graph_mode = cuda_graph_mode
         return load_ppo(env, checkpoint, config)
     if algorithm == "supermimic":
+        from clab.simulation import configure_cuda_graph
+
         from .supermimic.inference import load_policy as load_supermimic
 
-        if cuda_graph_mode != "auto":
-            raise ValueError("SuperMimic evaluation supports only automatic CUDA Graph mode")
-        return load_supermimic(
+        policy = load_supermimic(
             env,
             checkpoint,
             mdp_contract=task.supermimic_contract(env),
             task_name=task.name,
             training_env_config=training_env_config,
         )
+        # Physics graphs only; every evaluation batch resets the environment itself.
+        configure_cuda_graph(env, cuda_graph_mode)
+        return policy
     raise ValueError(f"Unsupported algorithm {algorithm!r}; choose one of {ALGORITHMS}")
