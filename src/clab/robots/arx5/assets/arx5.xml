@@ -1,0 +1,121 @@
+<mujoco model="arx5_robot_alignment">
+  <compiler angle="radian" autolimits="true"/>
+
+  <option timestep="0.008333333333333333" gravity="0 0 -9.81" integrator="implicitfast"/>
+
+  <asset>
+    <mesh name="base_link_mesh" file="meshes/base_link.obj"/>
+    <mesh name="link1_mesh" file="meshes/link1.obj"/>
+    <mesh name="link2_mesh" file="meshes/link2.obj"/>
+    <mesh name="link3_mesh" file="meshes/link3.obj"/>
+    <mesh name="link4_mesh" file="meshes/link4.obj"/>
+    <mesh name="link5_mesh" file="meshes/link5.obj"/>
+    <mesh name="link6_mesh" file="meshes/link6.obj"/>
+    <mesh name="link7_mesh" file="meshes/link7.obj"/>
+    <mesh name="link8_mesh" file="meshes/link8.obj"/>
+    <material name="arx_black" rgba="0 0 0 1"/>
+    <material name="arx_white" rgba="1 1 1 1"/>
+    <material name="camera_mat" rgba="0.1 0.1 0.1 1"/>
+    <material name="grasp_site_mat" rgba="0 0.8 1 0.7"/>
+  </asset>
+
+  <default>
+    <joint damping="0" armature="0"/>
+    <geom type="mesh" contype="1" conaffinity="1" friction="1 0.005 0.0001"/>
+  </default>
+
+  <!-- The fixed root and joint1 bodies overlap; MuJoCo does not automatically
+       filter this static-parent pair. Adjacent articulated links are filtered. -->
+  <contact>
+    <exclude body1="arx5" body2="link1"/>
+  </contact>
+
+  <worldbody>
+    <!-- Default root pose; tasks place the base from the workcell layout. -->
+    <body name="arx5" pos="-0.535 -0.21 0.8" quat="1.0 0.0 0.0 0.0" gravcomp="1">
+      <inertial pos="-3.0001e-05 3.0589e-05 0.027324" mass="0.43995" diaginertia="0.00017 0.00017 0.00016"/>
+      <geom name="base_link_visual" type="mesh" mesh="base_link_mesh" material="arx_black" contype="0" conaffinity="0"/>
+      <geom name="base_link_collision" type="mesh" mesh="base_link_mesh" contype="1" conaffinity="1"/>
+
+      <body name="link1" pos="0.0 0.0 0.0605" gravcomp="1">
+        <!-- Arm ranges follow the X5 software joint limits. -->
+        <joint name="joint1" type="hinge" axis="0.0 0.0 1.0" range="-3.14 2.618"/>
+        <inertial pos="0.0054231 -0.0080289 0.017086" mass="0.066982" fullinertia="0.00008 0.00003 0.00008 0 0.00001 0"/>
+        <geom name="link1_visual" type="mesh" mesh="link1_mesh" material="arx_black" contype="0" conaffinity="0"/>
+        <geom name="link1_collision" type="mesh" mesh="link1_mesh" contype="1" conaffinity="1"/>
+
+        <body name="link2" pos="0.02 0.0 0.04" gravcomp="1">
+          <joint name="joint2" type="hinge" axis="0.0 1.0 0.0" range="-0.05 3.5"/>
+          <inertial pos="-0.13237 0.0020852 0.00010549" mass="1.0795" fullinertia="0.00051 0.01599 0.01605 0.00001 -0.00004 0"/>
+          <geom name="link2_visual" type="mesh" mesh="link2_mesh" material="arx_black" contype="0" conaffinity="0"/>
+          <geom name="link2_collision" type="mesh" mesh="link2_mesh" contype="1" conaffinity="1"/>
+
+          <body name="link3" pos="-0.264 0.0 0.0" euler="3.1416 0 0" gravcomp="1">
+            <joint name="joint3" type="hinge" axis="0.0 1.0 0.0" range="-0.1 3.2"/>
+            <inertial pos="0.18531 0.00068376 -0.051638" mass="0.54534" fullinertia="0.00036 0.00423 0.00420 -0.00003 -0.00039 0.00001"/>
+            <geom name="link3_visual" type="mesh" mesh="link3_mesh" material="arx_white" contype="0" conaffinity="0"/>
+            <geom name="link3_collision" type="mesh" mesh="link3_mesh" contype="1" conaffinity="1"/>
+
+            <body name="link4" pos="0.245 0.0 -0.056" gravcomp="1">
+              <joint name="joint4" type="hinge" axis="0.0 1.0 0.0" range="-1.6 1.55"/>
+              <inertial pos="0.040231 0.0044807 -0.035335" mass="0.11714" fullinertia="0.00019 0.00023 0.00014 -0.00002 -0.00009 0.00002"/>
+              <geom name="link4_visual" type="mesh" mesh="link4_mesh" material="arx_black" contype="0" conaffinity="0"/>
+              <geom name="link4_collision" type="mesh" mesh="link4_mesh" contype="1" conaffinity="1"/>
+
+              <body name="link5" pos="0.06775 0.0005 -0.0865" gravcomp="1">
+                <joint name="joint5" type="hinge" axis="0.0 0.0 1.0" range="-1.57 1.57"/>
+                <inertial pos="0.003612 -1.5455e-05 0.055214" mass="0.63488" fullinertia="0.00083 0.00082 0.00026 0 0.00007 0"/>
+                <geom name="link5_visual" type="mesh" mesh="link5_mesh" material="arx_black" contype="0" conaffinity="0"/>
+                <geom name="link5_collision" type="mesh" mesh="link5_mesh" contype="1" conaffinity="1"/>
+
+                <body name="link6" pos="0.02895 0.0 0.0865" euler="-3.1416 0 0" gravcomp="1">
+                  <joint name="joint6" type="hinge" axis="1.0 0.0 0.0" range="-2.0 2.0"/>
+                  <inertial pos="0.041697 2.4368e-05 0.00014464" mass="0.44089" diaginertia="0.00038 0.00028 0.00050"/>
+                  <geom name="link6_visual" type="mesh" mesh="link6_mesh" material="arx_black" contype="0" conaffinity="0"/>
+                  <geom name="link6_collision" type="mesh" mesh="link6_mesh" contype="1" conaffinity="1"/>
+                  <!-- Keep the task reference frame without a visible marker. -->
+                  <site name="grasp_point" pos="0.145 0.0 0.0" size="0.006" group="5" rgba="0 0 0 0"/>
+
+                  <body name="camera_base" pos="0.057 0.0 0.0" euler="0 0 -3.1416" gravcomp="1">
+                    <body name="camera" pos="-0.0275 0.0 0.05" euler="0 0.3491 3.141592653589793" gravcomp="1">
+                      <camera name="wrist_camera" mode="fixed" pos="0.0 0.0 0.0" quat="1.0 0.0 0.0 0.0" fovy="42.47"/>
+                    </body>
+                  </body>
+
+                  <body name="link7" pos="0.08657 0.024896 -0.0002436" gravcomp="1">
+                    <joint name="joint7" type="slide" axis="0.0 1.0 0.0" range="0.0 0.044"/>
+                    <inertial pos="-0.00035522 -0.007827 -0.0029883" mass="0.064798" diaginertia="0.00002 0.00003 0.00003"/>
+                    <geom name="link7_visual" type="mesh" mesh="link7_mesh" material="arx_black" contype="0" conaffinity="0"/>
+                    <geom name="link7_collision" type="mesh" mesh="link7_mesh" contype="1" conaffinity="1" friction="2.0 0.005 0.0001" solimp="0.95 0.99 0.001" solref="0.01 1"/>
+                  </body>
+
+                  <body name="link8" pos="0.08657 -0.0249 -0.00024366" gravcomp="1">
+                    <joint name="joint8" type="slide" axis="0.0 -1.0 0.0" range="0.0 0.044"/>
+                    <inertial pos="-0.00035522 0.0078277 0.0024201" mass="0.064798" diaginertia="0.00002 0.00003 0.00003"/>
+                    <geom name="link8_visual" type="mesh" mesh="link8_mesh" material="arx_black" contype="0" conaffinity="0"/>
+                    <geom name="link8_collision" type="mesh" mesh="link8_mesh" contype="1" conaffinity="1" friction="2.0 0.005 0.0001" solimp="0.95 0.99 0.001" solref="0.01 1"/>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <key name="isaac_default" qpos="0.0 1.0 1.0 0.0 0.0 0.0 0.02 0.02"/>
+  </keyframe>
+
+  <actuator>
+    <motor name="joint1_torque" joint="joint1" ctrlrange="-50.0 50.0"/>
+    <motor name="joint2_torque" joint="joint2" ctrlrange="-50.0 50.0"/>
+    <motor name="joint3_torque" joint="joint3" ctrlrange="-50.0 50.0"/>
+    <motor name="joint4_torque" joint="joint4" ctrlrange="-50.0 50.0"/>
+    <motor name="joint5_torque" joint="joint5" ctrlrange="-50.0 50.0"/>
+    <motor name="joint6_torque" joint="joint6" ctrlrange="-50.0 50.0"/>
+    <position name="joint7_position" joint="joint7" ctrlrange="0.002 0.044" kp="200.0" kv="50.0" forcelimited="true" forcerange="-5.0 5.0"/>
+    <position name="joint8_position" joint="joint8" ctrlrange="0.002 0.044" kp="200.0" kv="50.0" forcelimited="true" forcerange="-5.0 5.0"/>
+  </actuator>
+</mujoco>

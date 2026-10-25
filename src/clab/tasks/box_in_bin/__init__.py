@@ -1,0 +1,1 @@
+"""BoxInBin task package."""

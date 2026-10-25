@@ -1,0 +1,1 @@
+"""Square task package."""

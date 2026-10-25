@@ -1,0 +1,168 @@
+"""Policy-independent physical process witnesses for Drawer.
+
+A scripted source validates at known expert phase boundaries. RL has no such phase
+oracle. This implementation advances through the same ordered physical milestones
+using observed geometry/contact rather than planner labels. That is an explicit
+task adaptation, not a literal replay of the expert's timing. The drawer starts
+open: insertion/opening is neither a milestone nor an inherited prefix. Lost
+transport grasp or pod escape during closing ends the sequence. Late reset
+prefixes are kept separate from this episode's accomplishments and observed.
+"""
+
+import math
+
+import torch
+
+from .settings import (
+    GRASP_SECONDS,
+    MIN_CLOSE_DELTA,
+    MIN_POD_LIFT,
+    RELEASE_SECONDS,
+    SUCCESS_SECONDS,
+)
+
+
+def pod_inside(pod_local, pod_height, slide):
+    """Source body-origin predicate; no invented lower-height/contact threshold."""
+    return (
+        ((pod_local[:, 0] - slide).abs() < 0.08)
+        & (pod_local[:, 1].abs() < 0.08)
+        & (pod_height < 0.06)
+    )
+
+
+def final_candidate(pod_local, pod_height, slide, grasped):
+    return (slide < 0.03) & pod_inside(pod_local, pod_height, slide) & ~grasped
+
+
+class PhysicalSequence:
+    """Vectorized ordered milestones; all history affecting success is observed.
+
+    Stage 0 grasp/lift, 1 release, 2 push, 3 final hold.
+    ``prefix`` only credits verified offline history. ``accomplished`` reports
+    solely events witnessed since this reset. Counts use physical durations.
+    """
+
+    observation_dim = 19
+
+    def __init__(self, count, device, control_dt):
+        self.stage = torch.zeros(count, dtype=torch.long, device=device)
+        self.prefix = torch.zeros((count, 2), dtype=torch.bool, device=device)
+        self.accomplished = torch.zeros((count, 3), dtype=torch.bool, device=device)
+        self.initial_q = torch.zeros(count, device=device)
+        self.initial_pod_z = torch.zeros(count, device=device)
+        self.close_q = torch.zeros(count, device=device)
+        self.grasp_count = torch.zeros(count, dtype=torch.long, device=device)
+        self.release_count = torch.zeros_like(self.grasp_count)
+        self.final_count = torch.zeros_like(self.grasp_count)
+        self.grasp_confirmed = torch.zeros(count, dtype=torch.bool, device=device)
+        self.push_contact = torch.zeros_like(self.grasp_confirmed)
+        self.failed = torch.zeros_like(self.grasp_confirmed)
+        self.success = torch.zeros_like(self.grasp_confirmed)
+        self.grasp_steps = math.ceil(GRASP_SECONDS / control_dt - 1e-9)
+        self.release_steps = math.ceil(RELEASE_SECONDS / control_dt - 1e-9)
+        self.success_steps = math.ceil(SUCCESS_SECONDS / control_dt - 1e-9)
+
+    def reset(self, indices, prefix, initial_q, initial_pod_z, close_q):
+        if prefix.shape != (len(indices), 2) or not ((prefix == 0) | (prefix == 1)).all():
+            raise ValueError("Drawer process prefix must be binary [N,2]")
+        if (prefix[:, 1] > prefix[:, 0]).any():
+            raise ValueError("Drawer release prefix requires the preceding grasp/lift witness")
+        self.prefix[indices] = prefix.bool()
+        self.stage[indices] = prefix.sum(-1).long()
+        self.accomplished[indices] = False
+        self.initial_q[indices] = initial_q
+        self.initial_pod_z[indices] = initial_pod_z
+        self.close_q[indices] = close_q
+        for name in (
+            "grasp_count",
+            "release_count",
+            "final_count",
+            "grasp_confirmed",
+            "push_contact",
+            "failed",
+            "success",
+        ):
+            getattr(self, name)[indices] = 0
+
+    def update(
+        self,
+        *,
+        slide,
+        pod_z,
+        inside,
+        grasped,
+        drawer_contact,
+        final,
+    ):
+        prior = self.stage.clone()
+        alive = ~self.failed
+        lifting = (prior == 0) & alive
+        self.grasp_count = torch.where(
+            lifting & grasped,
+            self.grasp_count + 1,
+            torch.where(lifting, 0, self.grasp_count),
+        )
+        self.failed |= lifting & self.grasp_confirmed & ~grasped
+        self.grasp_confirmed |= lifting & (self.grasp_count >= self.grasp_steps)
+        lifted = (
+            lifting
+            & ~self.failed
+            & self.grasp_confirmed
+            & grasped
+            & ((pod_z - self.initial_pod_z) >= MIN_POD_LIFT)
+        )
+        self.stage[lifted] = 1
+        self.accomplished[lifted, 0] = True
+
+        releasing = (prior == 1) & alive
+        self.failed |= releasing & ~grasped & ~inside
+        self.release_count = torch.where(
+            releasing & ~grasped & inside,
+            self.release_count + 1,
+            torch.where(releasing, 0, self.release_count),
+        )
+        released = releasing & ~self.failed & (self.release_count >= self.release_steps)
+        self.stage[released] = 2
+        self.close_q[released] = slide[released]
+        self.accomplished[released, 1] = True
+
+        closing = (prior == 2) & alive
+        self.failed |= closing & (grasped | ~inside)
+        self.push_contact |= closing & drawer_contact
+        closed = (
+            closing
+            & ~self.failed
+            & self.push_contact
+            & ((self.close_q - slide) >= MIN_CLOSE_DELTA)
+            & (slide <= 0.03)
+        )
+        self.stage[closed] = 3
+        self.accomplished[closed, 2] = True
+        candidate = (self.stage == 3) & ~self.failed & final
+        self.final_count = torch.where(candidate, self.final_count + 1, 0)
+        self.success[:] = self.final_count >= self.success_steps
+        return self.success
+
+    def observation(self):
+        columns = (
+            torch.nn.functional.one_hot(self.stage, 4).float(),
+            self.prefix.float(),
+            self.accomplished.float(),
+            torch.stack(
+                (
+                    self.initial_q,
+                    self.initial_pod_z,
+                    self.close_q,
+                    self.grasp_count / self.grasp_steps,
+                    self.release_count / self.release_steps,
+                    self.final_count / self.success_steps,
+                    self.grasp_confirmed.float(),
+                    self.push_contact.float(),
+                    self.failed.float(),
+                    self.success.float(),
+                ),
+                -1,
+            ),
+        )
+        return torch.cat(columns, -1)

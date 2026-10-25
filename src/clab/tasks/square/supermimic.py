@@ -1,0 +1,245 @@
+"""Square SuperMimic surrogate: nut threaded, seated, released and at rest.
+
+Native success needs a legal exposed-handle grasp observed earlier, physical
+seating with base support and no penetration, low speed and full release; a
+two-finger ring or mixed grasp ends the episode as invalid. Imagination carries
+the native ``grasp_seen`` and ``invalid`` flags as analytic state and replaces
+the contact predicates by grasp-point geometry in the nut frame plus a closed-
+on-object finger band. Seating keeps the native threaded/height/tilt geometry;
+support force and penetration are not modelled. Native real rewards and
+evaluation remain authoritative.
+"""
+
+import math
+
+import torch
+
+from clab.controllers.torch_kinematics import quat_apply, quat_inverse, six_to_quat
+from clab.tasks.supermimic import RigidObjectAdapter, RigidObjectMDP
+
+from .mdp import threaded_geometry
+from .props import NUT_BOXES, NUT_GRASP_POINT, NUT_SEATED_OFFSET
+from .settings import AssemblyCriteria
+
+_HANDLE_CENTRE, _HANDLE_HALF = NUT_BOXES[4]
+_RING_OUTER = max(position[0] + size[0] for position, size in NUT_BOXES[:4])
+
+
+def _apply_inverse(quaternion, vector):
+    return quat_apply(quat_inverse(quaternion), vector)
+
+
+class SquareMDP(RigidObjectMDP):
+    task = "square"
+    object_name = "nut"
+    target_name = "peg"
+    reward_mode = "imagined_endpoint_grasp_flags_seating_release"
+    process_fields = ("grasp_seen", "invalid")
+    # Handle grasps hold each finger at 0.011-0.018 m (grasped reset rows).
+    held_width = 0.0148
+    release_opening = 0.024
+
+    def __init__(
+        self,
+        *,
+        criteria,
+        reaching_scale,
+        alignment_scale,
+        tilt_scale,
+        insertion_scale,
+        grip_band=(0.008, 0.020),
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.criteria = criteria
+        self.reaching_scale = float(reaching_scale)
+        self.alignment_scale, self.tilt_scale = float(alignment_scale), float(tilt_scale)
+        self.insertion_scale = float(insertion_scale)
+        self.grip_band = tuple(float(value) for value in grip_band)
+        if not 0 < self.grip_band[0] < self.grip_band[1] < self.release_opening:
+            raise ValueError("grip_band must be ordered and below release_opening")
+
+    def _frames(self, s, c):
+        return (
+            self.obj(s, "position"),
+            six_to_quat(self.obj(s, "rotation")),
+            self.target(c, "position"),
+            six_to_quat(self.target(c, "rotation")),
+        )
+
+    def _grasp_local(self, s, c):
+        nut, nut_quat, _, _ = self._frames(s, c)
+        return _apply_inverse(nut_quat, self.physical_grasp(s, c) - nut)
+
+    def _gripping(self, s):
+        """Both fingers closed onto an object: inside the held band, not fully shut."""
+        fingers = self.state.get(s, "robot_q")[:, 6:8]
+        low, high = self.grip_band
+        return ((fingers >= low) & (fingers <= high)).all(-1)
+
+    def grasp_status(self, s, c):
+        """Proxies for native (legal handle grasp, wrong ring or mixed grasp)."""
+        local = self._grasp_local(s, c)
+        gripping = self._gripping(s)
+        near_slab = local[:, 2].abs() <= 2 * NUT_BOXES[0][1][2]
+        handle = (
+            (local[:, 0] >= _RING_OUTER + self.criteria.handle_clearance)
+            & (local[:, 0] <= _HANDLE_CENTRE[0] + _HANDLE_HALF[0])
+            & (local[:, 1].abs() <= _HANDLE_HALF[1] + self.criteria.contact_tolerance)
+        )
+        ring = (local[:, 0] < _RING_OUTER) & (local[:, 1].abs() <= _RING_OUTER)
+        return gripping & near_slab & handle, gripping & near_slab & ring
+
+    def _tilt(self, s, c):
+        _, nut_quat, _, peg_quat = self._frames(s, c)
+        normal = s.new_tensor((0.0, 0.0, 1.0)).expand(len(s), -1)
+        return _apply_inverse(peg_quat, quat_apply(nut_quat, normal))[:, 2].abs().clamp(0, 1)
+
+    def _seated(self, s, c):
+        """Native threaded geometry (hard) with differentiable height and tilt margins."""
+        nut, nut_quat, peg, peg_quat = self._frames(s, c)
+        threaded = threaded_geometry(
+            nut, nut_quat, peg, peg_quat, axial_tolerance=self.criteria.max_penetration
+        ).to(s.dtype)
+        relative = _apply_inverse(peg_quat, nut - peg)
+        margins = torch.stack(
+            (
+                self.criteria.seated_height_tolerance - (relative[:, 2] - NUT_SEATED_OFFSET).abs(),
+                self._tilt(s, c) - math.cos(math.radians(self.criteria.max_tilt_degrees)),
+            ),
+            -1,
+        )
+        hard = (margins >= 0).all(-1).to(s.dtype)
+        soft = torch.sigmoid(margins / self.smooth_temperature).prod(-1)
+        return threaded * (hard + (soft - soft.detach()))
+
+    def _flag(self, s, name):
+        return self.state.get(s, name).squeeze(-1)
+
+    def _candidate(self, s, c):
+        valid = self._flag(s, "grasp_seen") * (1 - self._flag(s, "invalid"))
+        return self._seated(s, c) * self._stable(s) * self._released(s) * valid
+
+    def advance_task_fields(self, fields, s, c):
+        provisional = self.state.pack(fields)
+        grasped, wrong = self.grasp_status(provisional, c)
+        invalid = torch.maximum(self.state.get(s, "invalid"), wrong.to(s.dtype)[:, None])
+        legal = (grasped.to(s.dtype)[:, None]) * (1 - invalid)
+        fields["invalid"] = invalid
+        fields["grasp_seen"] = torch.maximum(self.state.get(s, "grasp_seen"), legal)
+        super().advance_task_fields(fields, s, c)
+
+    def reward(self, s, a, s1, c):
+        nut, nut_quat, peg, peg_quat = self._frames(s1, c)
+        grasped, _ = self.grasp_status(s1, c)
+        grasped = grasped.to(s1.dtype)
+        invalid, grasp_seen = self._flag(s1, "invalid"), self._flag(s1, "grasp_seen")
+        valid = 1 - invalid
+        seated = self._seated(s1, c).detach()
+        handle = nut + quat_apply(nut_quat, nut.new_tensor(NUT_GRASP_POINT).expand_as(nut))
+        approach = (1 - grasped) * valid * (1 - seated * grasp_seen)
+        distance = (self.physical_grasp(s1, c) - handle).norm(dim=-1)
+        relative = _apply_inverse(peg_quat, nut - peg)
+        # acos has an infinite derivative at 1 (a level nut); stay just inside.
+        tilt = torch.acos(self._tilt(s1, c).clamp_max(1 - 1e-6))
+        alignment = torch.exp(
+            -(relative[:, :2].norm(dim=-1) / self.alignment_scale).square()
+            - (tilt / self.tilt_scale).square()
+        )
+        seated_target = peg + quat_apply(
+            peg_quat, peg.new_tensor((0.0, 0.0, NUT_SEATED_OFFSET)).expand_as(peg)
+        )
+        threaded = threaded_geometry(
+            nut, nut_quat, peg, peg_quat, axial_tolerance=self.criteria.max_penetration
+        ).to(s1.dtype)
+        insertion = torch.exp(-((nut - seated_target).norm(dim=-1) / self.insertion_scale).square())
+        candidate = self._candidate(s1, c)
+        values = {
+            "reaching": (1 - torch.tanh(distance / self.reaching_scale)) * approach,
+            "handle_grasp": grasped * valid,
+            "alignment": alignment * grasped * valid,
+            "insertion": insertion * threaded * grasp_seen * valid,
+            "release": candidate,
+            "invalid_grasp": invalid,
+            "success": self._success_term(s, s1, c),
+            **self._costs(s, a, s1),
+        }
+        reward = sum(self.weights[name] * value for name, value in values.items()) * self.dt
+        done = 1 - (1 - values["success"]) * (1 - invalid) * (1 - self._timeout(s1))
+        return reward, done
+
+    def task_contract(self):
+        return {
+            "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, both fingers opened past release_opening, grasp_seen and not invalid; no support-force, penetration or contact test",
+            "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band; replaces force-bearing finger contact classification",
+            "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
+            "grip_band": list(self.grip_band),
+            "criteria": vars(self.criteria),
+            "reward_scales": {
+                "reaching": self.reaching_scale,
+                "alignment": self.alignment_scale,
+                "tilt": self.tilt_scale,
+                "insertion": self.insertion_scale,
+            },
+        }
+
+
+class SquareAdapter(RigidObjectAdapter):
+    mdp_class = SquareMDP
+    object_entity = "nut"
+    target_entity = "peg"
+    object_geoms = tuple(f"nut/nut_collision_{index}" for index in range(5))
+    target_geoms = ("peg/peg_collision_0", "peg/peg_collision_1")
+    actor_terms = (
+        "nut_in_peg_frame",
+        "previous_actions",
+        "joint_pos",
+        "ee_in_base_frame",
+        "nut_in_ee_frame",
+        "peg_in_ee_frame",
+    )
+    reward_terms = frozenset(
+        {
+            "action_magnitude",
+            "action_rate",
+            "joint_vel",
+            "reaching",
+            "handle_grasp",
+            "alignment",
+            "insertion",
+            "release",
+            "invalid_grasp",
+            "success",
+        }
+    )
+
+    def __init__(self, env, **options):
+        rewards = env.cfg.rewards
+        criteria = env.cfg.terminations["success"].params["criteria"]
+        super().__init__(
+            env,
+            criteria=AssemblyCriteria(**criteria) if isinstance(criteria, dict) else criteria,
+            reaching_scale=rewards["reaching"].params["distance_scale"],
+            alignment_scale=rewards["alignment"].params["distance_scale"],
+            tilt_scale=rewards["alignment"].params["tilt_scale"],
+            insertion_scale=rewards["insertion"].params["distance_scale"],
+            **options,
+        )
+
+    @staticmethod
+    def robot_binding():
+        from .variants import DEFAULT_ROBOT
+
+        return DEFAULT_ROBOT
+
+    def task_bodies(self):
+        return ["nut/nut", "peg/peg"]
+
+    def process_state(self):
+        return (("grasp_seen", 1), ("invalid", 1))
+
+    def capture_extra(self):
+        return {
+            "grasp_seen": self.success.grasp_seen.float()[:, None],
+            "invalid": self.success.invalid.float()[:, None],
+        }
