@@ -18,11 +18,14 @@ from clab.controllers.torch_kinematics import quat_apply, quat_inverse, six_to_q
 from clab.tasks.supermimic import RigidObjectAdapter, RigidObjectMDP
 
 from .mdp import threaded_geometry
-from .props import NUT_BOXES, NUT_GRASP_POINT, NUT_SEATED_OFFSET
+from .props import NUT_BOXES, NUT_GRASP_POINT, NUT_HALF_HEIGHT, NUT_SEATED_OFFSET, PEG_HALF_HEIGHT
 from .settings import AssemblyCriteria
 
 _HANDLE_CENTRE, _HANDLE_HALF = NUT_BOXES[4]
 _RING_OUTER = max(position[0] + size[0] for position, size in NUT_BOXES[:4])
+# Peg-local nut centre held above the peg top, mid-range of the collector's
+# above-peg clearance (0.015-0.040 m).
+_ABOVE_PEG = PEG_HALF_HEIGHT + NUT_HALF_HEIGHT + 0.025
 
 
 def _apply_inverse(quaternion, vector):
@@ -48,9 +51,13 @@ class SquareMDP(RigidObjectMDP):
         tilt_scale,
         insertion_scale,
         grip_band=(0.008, 0.020),
+        carry_weight=0.2,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        if not 0 <= carry_weight < float("inf"):
+            raise ValueError("carry_weight must be finite and nonnegative")
+        self.carry_weight = float(carry_weight)
         self.criteria = criteria
         self.reaching_scale = float(reaching_scale)
         self.alignment_scale, self.tilt_scale = float(alignment_scale), float(tilt_scale)
@@ -167,18 +174,29 @@ class SquareMDP(RigidObjectMDP):
             nut, nut_quat, peg, peg_quat, axial_tolerance=self.criteria.max_penetration
         ).to(s1.dtype)
         insertion = torch.exp(-((nut - seated_target).norm(dim=-1) / self.insertion_scale).square())
+        # Imagination-only shaping. The native alignment and insertion terms are
+        # 3 cm Gaussians, flat at the ~12 cm start of a carry, so pull the nut
+        # toward the nearer of the above-peg and seated poses (descending onto
+        # the peg never lowers it). Once seated, holding the handle stops paying.
+        above_target = peg + quat_apply(
+            peg_quat, peg.new_tensor((0.0, 0.0, _ABOVE_PEG)).expand_as(peg)
+        )
+        carry = torch.exp(
+            -torch.minimum((nut - above_target).norm(dim=-1), (nut - seated_target).norm(dim=-1))
+        )
         candidate = self._candidate(s1, c)
         values = {
             "reaching": (1 - torch.tanh(distance / self.reaching_scale)) * approach,
-            "handle_grasp": grasped * valid,
-            "alignment": alignment * grasped * valid,
+            "handle_grasp": grasped * valid * (1 - seated),
+            "alignment": alignment * grasped * valid * (1 - seated),
             "insertion": insertion * threaded * grasp_seen * valid,
             "release": candidate,
             "invalid_grasp": invalid,
             "success": self._success_term(s, s1, c),
             **self._costs(s, a, s1),
         }
-        reward = sum(self.weights[name] * value for name, value in values.items()) * self.dt
+        reward = sum(self.weights[name] * value for name, value in values.items())
+        reward = (reward + self.carry_weight * carry * valid) * self.dt
         done = 1 - (1 - values["success"]) * (1 - invalid) * (1 - self._timeout(s1))
         return reward, done
 
@@ -187,6 +205,8 @@ class SquareMDP(RigidObjectMDP):
             "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, not both fingers inside grip_band (release proxy), grasp_seen and not invalid; no support-force, penetration or contact test",
             "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band; replaces force-bearing finger contact classification",
             "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
+            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added; handle_grasp and alignment gated off once seated; imagination only",
+            "carry_weight": self.carry_weight,
             "grip_band": list(self.grip_band),
             "criteria": vars(self.criteria),
             "reward_scales": {

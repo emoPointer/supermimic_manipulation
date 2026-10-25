@@ -97,16 +97,19 @@ Common to all tasks:
 BoxInBin, Lemon and MugHang add one imagination-only shaping term: once the object is
 placed, reaching stops paying and `release_weight` (0.2) × the finger opening fraction from
 the held width to the release opening is added, so holding on stops being rewarded. Square
-and Drawer already have native release terms. MugHang's native threading term vanishes
+and Drawer already have native release terms; for Square, holding the handle stops paying once
+the nut is seated. MugHang's native threading term vanishes
 while the handle is misaligned with the bar, so its imagination also adds a long-range pull of
-the handle toward the hanging target, `carry_weight` (0.2) × exp(−distance / 1 m). Drawer's
+the handle toward the hanging target, `carry_weight` (0.2) × exp(−distance / 1 m). Square's
+alignment and insertion terms are 3 cm Gaussians, so its imagination likewise pulls the nut toward
+the nearer of an above-peg pose and the seated pose. Drawer's
 native progress restarts at every stage (lift, place, close), so completing a stage would lower
 the reward; its imagined progress adds the number of completed stages instead.
 
 These settings are recorded in `params/mdp.json` and can be overridden with
 `--adapter-option NAME=VALUE` (`stable_linear_speed`, `stable_angular_speed`,
 `release_opening`, `release_weight`, `success_gradient_scale`; Lemon also `contact_margin`,
-MugHang also `carry_weight`, Drawer also `grasp_radius`). Real collection and evaluation always use the native reward
+MugHang and Square also `carry_weight`, Drawer also `grasp_radius`). Real collection and evaluation always use the native reward
 and success.
 
 ## Options and diagnostics
