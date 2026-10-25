@@ -9,10 +9,8 @@ from rsl_rl.utils.logger import Logger
 
 _COUNTS = re.compile(r"Episode_Metrics/type_(\d+)_(episodes|successes|success_rate)$")
 _DIAGNOSTICS = re.compile(r"Episode_Diagnostics/([a-z][a-z0-9_]*)_(episodes|count|rate)$")
-_PUBLISHED_SUCCESS_METRICS = frozenset(
-    ["Episode_Metrics/success_rate"]
-    + [f"Episode_Metrics/type_{kind}_success_rate" for kind in range(4)]
-)
+# Overall and per-category success; tasks have different category counts.
+_PUBLISHED_SUCCESS_METRICS = re.compile(r"Episode_Metrics/(success_rate|type_\d+_success_rate)")
 
 
 def _count_pair(episodes, count) -> torch.Tensor:
@@ -104,17 +102,17 @@ def aggregate_episode_metrics(records: list[dict]) -> list[dict]:
 
 
 def aggregate_success_rates(records: list[dict]) -> dict[str, float]:
-    """Expose the same five episode-weighted rates to non-RSL training loops."""
+    """Expose the same episode-weighted success rates to non-RSL training loops."""
     return {
         key: float(value)
         for record in aggregate_episode_metrics(records)
         for key, value in record.items()
-        if key in _PUBLISHED_SUCCESS_METRICS
+        if _PUBLISHED_SUCCESS_METRICS.fullmatch(key)
     }
 
 
 class EpisodeLogger(Logger):
-    """Aggregate counts internally; publish only the five success-rate metrics.
+    """Aggregate counts internally; publish only the success-rate metrics.
 
     Filter before the shared upstream logger so console, TensorBoard and W&B
     receive the same rates. Other namespaces, including diagnostics, are unchanged.
@@ -127,7 +125,8 @@ class EpisodeLogger(Logger):
                 {
                     key: value
                     for key, value in record.items()
-                    if not key.startswith("Episode_Metrics/") or key in _PUBLISHED_SUCCESS_METRICS
+                    if not key.startswith("Episode_Metrics/")
+                    or _PUBLISHED_SUCCESS_METRICS.fullmatch(key)
                 }
                 for record in aggregate_episode_metrics(self.ep_extras)
             ]
