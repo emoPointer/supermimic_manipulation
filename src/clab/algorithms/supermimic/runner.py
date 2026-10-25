@@ -550,6 +550,8 @@ class SuperMimicRunner:
                         # Keep detached diagnostics on their device until logging.
                         # Non-recorded iterations need no metric reduction/transfer.
                         metrics[name] = metrics.get(name, 0.0) + value / wm_updates
+            if wm_updates:
+                self.agent.check_world_model_updates()
             policy_phase = iteration - cfg.world_model_only_iterations
             if policy_phase >= 0 and policy_phase % cfg.policy_update_interval == 0:
                 for key, value in self.agent.update_policy(self.buffer).items():

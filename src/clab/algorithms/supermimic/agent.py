@@ -97,6 +97,8 @@ class SuperMimicAgent:
         )
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.learning_rate)
         self.world_model_updates = self.policy_updates = 0
+        # Device-side validity of every world-model update since construction.
+        self._world_model_ok = torch.ones((), dtype=torch.bool, device=self.device)
         self._world_model_loss_call = self._world_model_loss
         self._imagine_step_call = self._imagine_step
 
@@ -172,9 +174,9 @@ class SuperMimicAgent:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fixed-shape open-loop loss, detached diagnostics and one finite flag.
 
-        Replay guarantees that every window's first transition is valid. Use the
-        first such transition as padding before any MLP or task arithmetic, never
-        an invalid post-reset tail. LayerNorm and the task operate independently
+        Replay rows are always finite (a diverged world's row holds its PRE state
+        and is masked), so the first sampled transition is safe padding before any
+        MLP or task arithmetic, never an invalid post-reset tail. LayerNorm and the task operate independently
         per batch row; masked padding therefore contributes no loss or gradient.
         """
         state = windows["s"][:, 0]
@@ -227,7 +229,10 @@ class SuperMimicAgent:
 
         An ensemble fits every member on its own minibatch (members share no
         parameters, so one Adam step equals independent steps) and clips each
-        member's gradient separately. All validity checks precede backward.
+        member's gradient separately. Validity (finite predictions, errors, loss
+        and gradient norm, some valid target) accumulates on the device, so
+        successive updates queue without host synchronization; the caller runs
+        check_world_model_updates once per iteration, before any checkpoint.
         """
         kwargs = {} if env_range is None else {"env_range": env_range}
         size = self.cfg.wm_ensemble_size
@@ -239,20 +244,15 @@ class SuperMimicAgent:
                 results.append(self._world_model_loss_call(windows))
             else:
                 results.append(self._world_model_loss_call(windows, member))
-        if not bool(torch.stack([finite for _, _, finite in results]).all()):
-            raise FloatingPointError(
-                "SuperMimic non-finite world model prediction, error or loss, or no valid targets"
-            )
+        valid = torch.stack([finite for _, _, finite in results]).all()
         self.wm_optimizer.zero_grad(set_to_none=True)
         for loss, _, _ in results:
             loss.backward()
         groups = [self.wm.parameters()] if size == 1 else [net.parameters() for net in self.wm.nets]
         grad = torch.stack(
-            [
-                nn.utils.clip_grad_norm_(group, self.cfg.max_grad_norm, error_if_nonfinite=True)
-                for group in groups
-            ]
+            [nn.utils.clip_grad_norm_(group, self.cfg.max_grad_norm) for group in groups]
         ).mean()
+        self._world_model_ok &= valid & torch.isfinite(grad)
         self.wm_optimizer.step()
         self.world_model_updates += 1
         loss = torch.stack([loss.detach() for loss, _, _ in results]).mean()
@@ -265,6 +265,14 @@ class SuperMimicAgent:
             "wm_valid_steps": stats[3],
             "wm_grad_norm": grad.detach(),
         }
+
+    def check_world_model_updates(self) -> None:
+        """Raise if any world-model update so far was invalid (one host synchronization)."""
+        if not bool(self._world_model_ok):
+            raise FloatingPointError(
+                "SuperMimic non-finite world model prediction, error, loss or gradient, "
+                "or no valid targets"
+            )
 
     @torch.no_grad()
     def world_model_step_loss(self, windows) -> torch.Tensor:
