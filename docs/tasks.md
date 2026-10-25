@@ -78,7 +78,7 @@ Grasp the square nut by its protruding handle and thread it onto the fixed peg.
 | Horizon | 16 s |
 | Observations | actor 195; critic 153 |
 | Rewards | `reaching` 0.2, `handle_grasp` 0.1, `alignment` 0.1, `insertion` 0.2, `release` 0.1, the shared action/joint costs, `success` +10, `invalid_grasp` −2 |
-| Success | Peg threaded through the hole; nut seated at peg-local Z = −0.02 m (±2 mm) with tilt ≤ 5°; base support ≥ 0.05 N; robot fully released; speeds ≤ 0.01 m/s and 0.1 rad/s; object contact penetration ≤ 1 mm; a legal handle grasp observed earlier in the episode; held 0.5 s |
+| Success | Peg threaded through the hole; nut seated at peg-local Z = −0.02 m (±2 mm) with tilt ≤ 5°; base support ≥ 0.05 N; robot fully released; speeds ≤ 0.01 m/s and 0.1 rad/s; object contact penetration ≤ 1 mm; a legal handle grasp observed earlier in the episode (the grasped categories start from a verified legal handle grasp, which counts); held 0.5 s |
 | Failure | Grasping the ring body (or a mixed handle/ring grasp) with both fingers ends the episode with −2 |
 | Reset types | `NutRestingEEAnywhere`, `NutRestingHandleGrasped`, `NutAirborneHandleGrasped`, `NutPartiallyInsertedHandleGrasped` (labelled `above_peg` / `threaded`) |
 | Bank frame | Environment-world poses |

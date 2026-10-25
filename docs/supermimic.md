@@ -46,7 +46,10 @@ reset) through a read-only hook; it never replaces the simulator or the controll
 
 A world whose physics diverged is terminated by the task; its transition is stored with the
 finite pre-step state, zero reward and an invalid flag, and world-model windows mask it
-(`diverged_transitions` in the completion report counts them).
+(`diverged_transitions` in the completion report counts them). A contact sensor that
+matches more contacts than its storage only drops the extra matches, so such world-steps
+are counted (`Train/contact_match_overflow_world_steps`); any physics capacity overflow
+stops the run.
 
 The operational-space controller re-anchors at the current end-effector pose on every
 action, so it has no internal memory to model. The world model predicts only the physical
@@ -79,7 +82,7 @@ the reduced state, so each task replaces them with geometric surrogates:
 | --- | --- |
 | `box_in_bin` | Native placement geometry; speeds below 0.03 m/s and 0.5 rad/s (native 0.01 and 0.1); both fingers opened past 0.028 m |
 | `lemon` | Native centre XY and height thresholds; height at most `contact_margin` (0.01 m) above the resting height as the contact proxy; both fingers opened past 0.023 m |
-| `square` | Native threaded/height/tilt geometry; handle versus ring grasp from the grasp point in the nut frame and a closed-on-object finger band, carried as `grasp_seen`/`invalid` flags; release past 0.024 m; looser speeds |
+| `square` | Native threaded/height/tilt geometry; handle versus ring grasp from the grasp point in the nut frame and a closed-on-object finger band, carried as `grasp_seen`/`invalid` flags; released when not both fingers are inside that band; looser speeds |
 | `mug_hang` | Native tree-frame envelope and handle-on-bar geometry; looser speed limit; both fingers opened past 0.015 m |
 | `drawer` | Native physical-sequence update rules; pod grasp from grasp-point distance (`grasp_radius` 0.03 m) and finger band; push contact from the grasp point at the front panel; native final candidate |
 
