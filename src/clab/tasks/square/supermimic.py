@@ -77,6 +77,20 @@ class SquareMDP(RigidObjectMDP):
         low, high = self.grip_band
         return ((fingers >= low) & (fingers <= high)).all(-1)
 
+    def _released(self, s):
+        """Not both fingers inside grip_band, the proxy for no nut-robot contact.
+
+        Native release only requires the contact to end: a finger that opens past
+        the band, or closes beside the handle, no longer grips it. Requiring both
+        fingers past release_opening missed most native releases.
+        """
+        fingers = self.state.get(s, "robot_q")[:, 6:8]
+        low, high = self.grip_band
+        inside = self._gate(fingers - low, self.release_temperature) * self._gate(
+            high - fingers, self.release_temperature
+        )
+        return 1 - inside.prod(-1)
+
     def grasp_status(self, s, c):
         """Proxies for native (legal handle grasp, wrong ring or mixed grasp)."""
         local = self._grasp_local(s, c)
@@ -170,7 +184,7 @@ class SquareMDP(RigidObjectMDP):
 
     def task_contract(self):
         return {
-            "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, both fingers opened past release_opening, grasp_seen and not invalid; no support-force, penetration or contact test",
+            "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, not both fingers inside grip_band (release proxy), grasp_seen and not invalid; no support-force, penetration or contact test",
             "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band; replaces force-bearing finger contact classification",
             "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
             "grip_band": list(self.grip_band),

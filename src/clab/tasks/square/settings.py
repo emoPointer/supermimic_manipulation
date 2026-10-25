@@ -9,6 +9,9 @@ RESET_TYPES = (
     "NutAirborneHandleGrasped",
     "NutPartiallyInsertedHandleGrasped",
 )
+# Grasped categories start from a collector-verified legal handle grasp
+# (unbroken legal contact); success counts it as observed in the episode.
+INHERITED_HANDLE_GRASP = tuple(kind.endswith("HandleGrasped") for kind in RESET_TYPES)
 EPISODE_SECONDS = 16.0
 DESCENT_STEPS = 120  # Six seconds: the clipped controller must catch the moving target.
 STABLE_SECONDS = 0.5

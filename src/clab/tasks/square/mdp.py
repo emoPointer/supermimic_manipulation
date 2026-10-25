@@ -22,7 +22,7 @@ from .props import (
     PEG_HALF_WIDTH,
     handle_contact_bounds,
 )
-from .settings import AssemblyCriteria
+from .settings import INHERITED_HANDLE_GRASP, AssemblyCriteria
 from .variants import DEFAULT_ROBOT
 
 
@@ -126,6 +126,7 @@ class StableSuccess(ManagerTermBase):
         self.criteria = AssemblyCriteria(**cfg.params["criteria"])
         self.counter = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
         self.required_steps = math.ceil(self.criteria.stable_seconds / env.step_dt - 1e-9)
+        self.inherited_grasp = torch.tensor(INHERITED_HANDLE_GRASP, device=env.device)
         for name in (
             "grasp_seen",
             "threaded_seen",
@@ -150,6 +151,13 @@ class StableSuccess(ManagerTermBase):
             "candidate",
         ):
             getattr(self, name)[indices] = False
+        # A grasped category starts in a collector-verified legal handle grasp.
+        # Contacts are first checked after one control step, when an opening
+        # gripper has already left the handle, so credit the initial grasp here.
+        # The reset event has already sampled this episode's category.
+        if "reset_from_bank" in self._env.event_manager.active_terms.get("reset", []):
+            event = self._env.event_manager.get_term_cfg("reset_from_bank").func
+            self.grasp_seen[indices] = self.inherited_grasp[event.task_id[indices]]
 
     def __call__(self, env, *, criteria):
         del criteria  # Validated, immutable copy from the recorded term config.
