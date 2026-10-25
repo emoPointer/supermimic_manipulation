@@ -228,6 +228,7 @@ def train(
             "terminal_transitions": runner.terminal_transitions,
             "diverged_transitions": runner.diverged_transitions,
             "contact_match_overflow_world_steps": runner.contact_match_overflow_world_steps,
+            "physics_overflow_world_steps": runner.physics_overflow_world_steps,
             "replay_allocated_bytes": runner.buffer.allocated_nbytes,
             "pinned_replay_steps": runner.buffer.pinned_size,
             "world_model_updates": runner.agent.world_model_updates,

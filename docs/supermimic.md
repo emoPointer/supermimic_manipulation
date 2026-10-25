@@ -48,8 +48,10 @@ A world whose physics diverged is terminated by the task; its transition is stor
 finite pre-step state, zero reward and an invalid flag, and world-model windows mask it
 (`diverged_transitions` in the completion report counts them). A contact sensor that
 matches more contacts than its storage only drops the extra matches, so such world-steps
-are counted (`Train/contact_match_overflow_world_steps`); any physics capacity overflow
-stops the run.
+are counted (`Train/contact_match_overflow_world_steps`). A physics capacity overflow drops
+contacts or constraints: that world's transitions are excluded like diverged ones until it
+resets (`Train/physics_overflow_world_steps`), and the run stops if more than 1% of the
+worlds overflow at once.
 
 The operational-space controller re-anchors at the current end-effector pose on every
 action, so it has no internal memory to model. The world model predicts only the physical

@@ -162,8 +162,10 @@ def make_env_cfg(*, play=False, reset_bank=None):
             "process_failure": TerminationTermCfg(func=mdp.process_failure),
         },
         sim=SimulationCfg(
-            nconmax=256,
-            njmax=1024,
+            # Pushing the drawer with compound fingertips needed more than 1024
+            # constraint rows in one world once the policy acted.
+            nconmax=512,
+            njmax=2048,
             # Compound fingertips against the multi-piece housing can match many
             # contacts in one sensor; 327 were observed once the policy acted.
             # This is sensor storage, not a change to contact forces/physics.

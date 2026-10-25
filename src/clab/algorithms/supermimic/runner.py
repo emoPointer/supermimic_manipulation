@@ -27,7 +27,8 @@ from .networks import ACTOR_INPUT_NORMALIZATION
 
 # mujoco_warp OverflowType.CONTACT_MATCH: a contact sensor matched more contacts
 # than its storage. Extra matches are dropped (the sensor still reports a found
-# contact) and physics is unchanged, so it is counted rather than fatal.
+# contact) and physics is unchanged. Every other overflow bit drops contacts or
+# constraints, so that world's physics is no longer trustworthy.
 CONTACT_MATCH_OVERFLOW = 1 << 6
 
 
@@ -187,6 +188,7 @@ class SuperMimicRunner:
         self.terminal_transitions = 0
         self.diverged_transitions = 0
         self.contact_match_overflow_world_steps = 0
+        self.physics_overflow_world_steps = 0
 
     def _record_reward_comparison(self, model_reward, model_done, native_reward, native_done):
         expected_shape = (self.env.num_envs,)
@@ -271,13 +273,30 @@ class SuperMimicRunner:
             observations, reward, terminated, truncated, extras = self.env.step(action)
             self._count_episodes(terminated, truncated)
             post = self.adapter.post_step()
+            # Overflow flags persist until a world resets. A few worlds with a
+            # physics overflow are excluded from world-model fitting until they
+            # reset; many at once means the task's nconmax/njmax are too small.
+            overflow = self.env.sim.data.overflow
+            physics = torch.bitwise_and(overflow, ~CONTACT_MATCH_OVERFLOW) != 0
+            if bool((overflow != 0).any()):
+                overflowed = int(physics.sum())
+                if overflowed > max(1, self.env.num_envs // 100):
+                    codes = sorted(set(overflow[physics].tolist()))
+                    raise RuntimeError(
+                        f"Physics capacity overflow in {overflowed} worlds (mujoco_warp "
+                        f"OverflowType bitmasks {codes}); raise the task's nconmax or njmax"
+                    )
+                self.physics_overflow_world_steps += overflowed
+                self.contact_match_overflow_world_steps += int(((overflow != 0) & ~physics).sum())
             # A world whose physics diverged was terminated and reset by the task.
-            # Its POST row is not a real transition: replace it by the finite PRE
-            # state with zero reward and mark it invalid for world-model windows.
-            valid = torch.isfinite(post).all(-1) & torch.isfinite(reward)
+            # Its POST row, like an overflowed world's, is not a trustworthy
+            # transition: replace it by the finite PRE state with zero reward and
+            # mark it invalid for world-model windows.
+            finite = torch.isfinite(post).all(-1) & torch.isfinite(reward)
+            valid = finite & ~physics
             post = torch.where(valid[:, None], post, state)
             reward = torch.where(valid, reward, 0.0)
-            self.diverged_transitions += int((~valid).sum().item())
+            self.diverged_transitions += int((~finite).sum().item())
             transition = {
                 "s": state,
                 "s1": post,
@@ -312,18 +331,6 @@ class SuperMimicRunner:
                     ("native_only", native & ~surrogate),
                 ):
                     self.candidate_counts[key] += int(value.sum().item())
-            overflow = self.env.sim.data.overflow
-            if bool((overflow != 0).any()):
-                physics = (overflow & ~CONTACT_MATCH_OVERFLOW) != 0
-                if bool(physics.any()):
-                    codes = sorted(set(overflow[physics].tolist()))
-                    raise RuntimeError(
-                        f"Physics capacity overflow in {int(physics.sum())} worlds "
-                        f"(mujoco_warp OverflowType bitmasks {codes}); raise the task's "
-                        "nconmax or njmax"
-                    )
-                # Flags persist until the world resets, so this counts world-steps.
-                self.contact_match_overflow_world_steps += int((overflow != 0).sum())
             self.buffer.add(transition)
             self.agent.observe_transition(transition)
             self.agent.observe_actor_observation(observations["actor"])
@@ -613,6 +620,7 @@ class SuperMimicRunner:
                         "Train/contact_match_overflow_world_steps": (
                             self.contact_match_overflow_world_steps
                         ),
+                        "Train/physics_overflow_world_steps": self.physics_overflow_world_steps,
                         "Train/wall_seconds": time.monotonic() - start,
                         "Model/native_observation_max_error": self.max_observation_error,
                         "Model/native_observation_rotation_coordinate_max_error": getattr(
