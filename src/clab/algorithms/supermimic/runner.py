@@ -306,8 +306,14 @@ class SuperMimicRunner:
                     ("native_only", native & ~surrogate),
                 ):
                     self.candidate_counts[key] += int(value.sum().item())
-            if bool((self.env.sim.data.overflow != 0).any()):
-                raise RuntimeError("Physics contact/constraint capacity overflow")
+            overflow = self.env.sim.data.overflow
+            if bool((overflow != 0).any()):
+                codes = sorted(set(overflow[overflow != 0].tolist()))
+                raise RuntimeError(
+                    f"Physics capacity overflow in {int((overflow != 0).sum())} worlds "
+                    f"(mujoco_warp OverflowType bitmasks {codes}); raise the task's "
+                    "nconmax, njmax or contact_sensor_maxmatch"
+                )
             self.buffer.add(transition)
             self.agent.observe_transition(transition)
             self.agent.observe_actor_observation(observations["actor"])

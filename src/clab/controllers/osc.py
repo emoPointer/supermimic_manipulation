@@ -102,7 +102,9 @@ def operational_space_torque(
     if solver != "pinv":
         raise ValueError(f"Unknown OSC inertia solver: {solver}")
     jac, matrix = jacobian.double(), mass.double()
-    inverse_inertia = jac @ torch.linalg.solve(matrix, jac.transpose(-1, -2))
+    # solve_ex skips the host-side error check; the mass matrix is positive definite.
+    solution = torch.linalg.solve_ex(matrix, jac.transpose(-1, -2), check_errors=False).result
+    inverse_inertia = jac @ solution
     inverse_inertia = (inverse_inertia + inverse_inertia.transpose(-1, -2)) / 2
     inertia = torch.linalg.pinv(inverse_inertia, rtol=rcond, hermitian=True)
     torque = jac.transpose(-1, -2) @ inertia @ acceleration.double().unsqueeze(-1)
@@ -149,13 +151,25 @@ class OscAction(ActionTerm):
             self._point_wp = wp.zeros(self.num_envs, dtype=wp.vec3)
             self._body_wp = wp.zeros(self.num_envs, dtype=wp.int32)
             self._body_wp.fill_(self._ee_body_id)
-            self._rhs_wp = wp.zeros((self.num_envs, nv), dtype=float)
-            self._sol_wp = wp.zeros((self.num_envs, nv), dtype=float)
         self._jacp = wp.to_torch(self._jacp_wp)
         self._jacr = wp.to_torch(self._jacr_wp)
         self._point = wp.to_torch(self._point_wp).view(self.num_envs, 3)
-        self._rhs = wp.to_torch(self._rhs_wp)
-        self._sol = wp.to_torch(self._sol_wp)
+        # Read the six-arm-joint block of the joint-space inertia with one gather
+        # from the CSR storage, at the same addresses mujoco_warp's mul_m uses.
+        model = env.sim.wp_model
+        rowadr, columns, addresses = (
+            array.numpy() for array in (model.M_mulm_rowadr, model.M_mulm_col, model.M_mulm_madr)
+        )
+        arm_dofs = [int(dof) for dof in self._arm_dof_ids.tolist()]
+        index = [[-1] * 6 for _ in arm_dofs]
+        for row, dof in enumerate(arm_dofs):
+            for entry in range(rowadr[dof], rowadr[dof + 1]):
+                if int(columns[entry]) in arm_dofs:
+                    index[row][arm_dofs.index(int(columns[entry]))] = int(addresses[entry])
+        if min(min(row) for row in index) < 0:
+            raise ValueError("OSC arm inertia block is missing from the CSR mass matrix")
+        self._mass_index = torch.tensor(index, device=self.device)
+        self._mass = wp.to_torch(env.sim.wp_data.M)
 
     @property
     def action_dim(self) -> int:
@@ -216,14 +230,8 @@ class OscAction(ActionTerm):
         ee_velocity = torch.bmm(jac, data.qvel[:, self._arm_dof_ids].unsqueeze(-1)).squeeze(-1)
         desired_accel = self._stiffness * pose_error - self._damping * ee_velocity
         # Invert the six-arm-joint mass block, not the inverse of
-        # the full robot+box mass matrix. Extract this block via M @ basis_i.
-        mass_matrix = torch.empty((self.num_envs, 6, 6), device=self.device)
-        for col, dof_id in enumerate(self._arm_dof_ids):
-            self._rhs.zero_()
-            self._rhs[:, dof_id] = 1.0
-            with wp.ScopedDevice(sim.wp_device):
-                mjwarp.mul_m(sim.wp_model, sim.wp_data, self._sol_wp, self._rhs_wp)
-            mass_matrix[:, :, col] = self._sol[:, self._arm_dof_ids]
+        # the full robot+box mass matrix.
+        mass_matrix = self._mass[:, self._mass_index]
         # A world whose physics diverged gets zero arm torque (identity Jacobian
         # and mass, zero acceleration) so the batched solve stays well posed;
         # the task's divergence termination resets it. Finite worlds are unchanged.
