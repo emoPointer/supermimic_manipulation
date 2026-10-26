@@ -55,9 +55,10 @@ class DrawerMDP(RigidObjectMDP):
         grip_band=(0.018, 0.030),
         grasp_radius=0.03,
         panel_reach=(-0.005, 0.03),
+        action_bound_weight=0.05,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(action_bound_weight=action_bound_weight, **kwargs)
         self.grip_band = tuple(float(v) for v in grip_band)
         self.grasp_radius = float(grasp_radius)
         self.panel_reach = tuple(float(v) for v in panel_reach)
@@ -75,14 +76,17 @@ class DrawerMDP(RigidObjectMDP):
         return local, pod[:, 2], self._field(s, "slide_q"), housing_quat
 
     def contacts(self, s, c):
-        """Proxies for native (two-finger pod grasp, finger-drawer contact)."""
+        """Proxies for native (two-finger pod grasp, finger-drawer contact).
+
+        The grasp is straight-through in the finger band; drawer contact is hard.
+        """
         pod = self.obj(s, "position")
         grip = self.physical_grasp(s, c)
         pod_local = _apply_inverse(six_to_quat(self.obj(s, "rotation")), grip - pod)
         fingers = self.state.get(s, "robot_q")[:, 6:8]
         low, high = self.grip_band
-        closed = ((fingers >= low) & (fingers <= high)).all(-1)
-        grasped = closed & (pod_local.norm(dim=-1) <= self.grasp_radius)
+        closed = self._band(fingers, low, high, self.release_temperature).prod(-1)
+        grasped = closed * (pod_local.norm(dim=-1) <= self.grasp_radius).to(closed.dtype)
         _, _, slide, housing_quat = self._geometry(s, c)
         local = _apply_inverse(housing_quat, grip - self.target(c, "position"))
         front = local[:, 0] - slide - _PANEL_X
@@ -99,7 +103,7 @@ class DrawerMDP(RigidObjectMDP):
         """Native final predicate with differentiable slide and placement margins."""
         local, height, slide, _ = self._geometry(s, c)
         grasped, _ = self.contacts(s, c)
-        hard = final_candidate(local, height, slide, grasped).to(s.dtype)
+        hard = final_candidate(local, height, slide, grasped.detach() > 0.5).to(s.dtype)
         margins = torch.stack(
             (
                 0.03 - slide,
@@ -112,6 +116,39 @@ class DrawerMDP(RigidObjectMDP):
         soft = torch.sigmoid(margins / self.smooth_temperature).prod(-1)
         return hard + (soft - soft.detach())
 
+    def _inside(self, local, height, slide):
+        """Native pod_inside forward with sigmoid straight-through margins."""
+        hard = pod_inside(local, height, slide).to(local.dtype)
+        margins = torch.stack(
+            (0.08 - (local[:, 0] - slide).abs(), 0.08 - local[:, 1].abs(), 0.06 - height), -1
+        )
+        soft = torch.sigmoid(margins / self.smooth_temperature).prod(-1)
+        return hard + (soft - soft.detach())
+
+    def _failure(self, s, s1, c):
+        """This transition's native failure event with a straight-through hazard.
+
+        Forward: the analytic ``failed`` latch turning on (imagination never starts
+        from a failed state). Backward: the derivative of the active stage's native
+        failure condition through the straight-through grasp and inside gates. Used
+        as ``done``, it shows the actor that failing forfeits the rest of the imagined
+        return; the hard latch has no derivative, while a released pod falling toward
+        the place target does, so opening the gripper above the drawer looked good.
+        """
+        stage = self._field(s, "stage").round()
+        alive = 1 - self._field(s, "failed")
+        local, height, slide, _ = self._geometry(s1, c)
+        grasped, _ = self.contacts(s1, c)
+        inside = self._inside(local, height, slide)
+        lost = 1 - grasped
+        hazard = alive * (
+            (stage == 0).to(s.dtype) * self._field(s, "grasp_confirmed") * lost
+            + (stage == 1).to(s.dtype) * lost * (1 - inside)
+            + (stage == 2).to(s.dtype) * (1 - lost * inside)
+        )
+        event = (self._field(s1, "failed") - self._field(s, "failed")).clamp(0, 1)
+        return event + (hazard - hazard.detach())
+
     def _candidate(self, s, c):
         at_hold = (self._field(s, "stage") == 3).to(s.dtype) * (1 - self._field(s, "failed"))
         return at_hold * self._final(s, c)
@@ -121,6 +158,7 @@ class DrawerMDP(RigidObjectMDP):
         provisional = self.state.pack(fields)
         local, pod_z, slide, _ = self._geometry(provisional, c)
         grasped, drawer = self.contacts(provisional, c)
+        grasped = grasped.detach() > 0.5
         inside = pod_inside(local, pod_z, slide)
         get = lambda name: self._field(s, name)  # noqa: E731
         stage = get("stage").round().long()
@@ -234,14 +272,15 @@ class DrawerMDP(RigidObjectMDP):
             **self._costs(s, a, s1),
         }
         reward = sum(self.weights[name] * value for name, value in values.items()) * self.dt
-        failed = self._field(s1, "failed")
+        failed = self._failure(s, s1, c)
         done = 1 - (1 - values["success"]) * (1 - failed) * (1 - self._timeout(s1))
         return reward, done
 
     def task_contract(self):
         return {
             "imagined_success": "native PhysicalSequence update and final predicate on predicted states; pod grasp and drawer contact replaced by geometric proxies",
-            "imagined_grasp": "physical grasp point within grasp_radius of the pod centre and both fingers within grip_band",
+            "imagined_grasp": "physical grasp point within grasp_radius of the pod centre and both fingers within grip_band (straight-through in the band)",
+            "imagined_failure": "done uses the native failure event (failed latch turning on) forward and the derivative of the active stage's failure condition backward, through straight-through grasp and inside gates",
             "imagined_drawer_contact": "physical grasp point within panel_reach of the front panel outer face, inside its width and height",
             "grip_band": list(self.grip_band),
             "grasp_radius": self.grasp_radius,

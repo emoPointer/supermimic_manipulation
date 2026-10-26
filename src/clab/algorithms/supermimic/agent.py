@@ -61,6 +61,9 @@ class SuperMimicAgent:
     def __init__(self, mdp, cfg: SuperMimicConfig, device):
         cfg.validate()
         self.mdp, self.cfg = mdp, cfg
+        # Optional task-model hook: imagination-only cost of raw commands outside
+        # the controller's responsive range. Task models without it add nothing.
+        self._action_bound_cost = getattr(mdp, "action_bound_cost", None)
         self.device = torch.device(device)
         for name in ("state_dim", "delta_dim", "obs_dim", "action_dim", "input_dim", "critic_dim"):
             value = getattr(mdp, name)
@@ -317,6 +320,8 @@ class SuperMimicAgent:
             index = torch.randint(self.cfg.wm_ensemble_size, (state.shape[0],), device=state.device)
             next_state, disagreement = self.wm.imagine(state, action, context, index)
         reward, done = self.mdp.reward(state, action, next_state, context)
+        if self._action_bound_cost is not None:
+            reward = reward - self._action_bound_cost(action)
         reward = reward - self.cfg.uncertainty_penalty * disagreement
         next_obs = self.mdp.advance_obs(obs, next_state, action, context)
         flags = torch.stack(

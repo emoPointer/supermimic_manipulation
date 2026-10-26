@@ -187,6 +187,8 @@ class RigidObjectMDP:
         stable_angular_speed=0.5,
         release_weight=0.2,
         held_width=None,
+        action_bound_weight=0.0,
+        gripper_bound=3.0,
     ):
         release_opening = self.release_opening if release_opening is None else release_opening
         held_width = self.held_width if held_width is None else held_width
@@ -208,6 +210,12 @@ class RigidObjectMDP:
             raise ValueError("Release, stability and success-gradient settings must be positive")
         if release_opening <= held_width:
             raise ValueError("release_opening must exceed the held finger width")
+        if not math.isfinite(action_bound_weight) or action_bound_weight < 0:
+            raise ValueError("action_bound_weight must be finite and nonnegative")
+        if not math.isfinite(gripper_bound) or gripper_bound <= 0:
+            raise ValueError("gripper_bound must be positive and finite")
+        self.action_bound_weight = float(action_bound_weight)
+        self.gripper_bound = float(gripper_bound)
         self.held_width = float(held_width)
         self.gripper_gradient_temperature = float(gripper_gradient_temperature)
         self.release_opening = float(release_opening)
@@ -329,6 +337,18 @@ class RigidObjectMDP:
         soft = torch.sigmoid(margin / (self.smooth_temperature if scale is None else scale))
         return hard + (soft - soft.detach())
 
+    def _open_command(self, a):
+        """Straight-through native gripper decision (raw >= 0 opens) of action ``a``."""
+        raw = a[:, self.gripper_action_index]
+        soft = torch.sigmoid(raw / self.gripper_gradient_temperature)
+        return (raw >= 0).to(raw.dtype) + (soft - soft.detach())
+
+    def _band(self, value, low, high, scale):
+        """Straight-through ``low <= value <= high`` with sigmoid edges of width ``scale``."""
+        hard = ((value >= low) & (value <= high)).to(value.dtype)
+        soft = torch.sigmoid((value - low) / scale) * torch.sigmoid((high - value) / scale)
+        return hard + (soft - soft.detach())
+
     def _stable(self, s):
         velocity = self.obj(s, "velocity")
         return self._gate(self.stable_linear_speed - velocity[:, :3].norm(dim=-1)) * self._gate(
@@ -362,6 +382,21 @@ class RigidObjectMDP:
             "action_rate": (a - g(s, "previous_action")).square().sum(-1).clamp_max(1e4),
             "joint_vel": g(s1, "robot_dq")[:, :6].square().sum(-1).clamp_max(1e4),
         }
+
+    def action_bound_cost(self, a):
+        """Imagination-only per-step cost of raw commands outside the responsive range.
+
+        Pose axes past ``input_limit`` are clipped and the binary gripper's sigmoid
+        derivative vanishes far from zero, so an actor that drifts there receives no
+        gradient and its decision freezes. ``action_bound_weight`` (per second) pulls
+        it back; 0 disables the cost.
+        """
+        index = self.gripper_action_index
+        excess = (a[:, index].abs() - self.gripper_bound).clamp_min(0).square()
+        if self.input_limit is not None:
+            pose = (a[:, :index].abs() - self.input_limit).clamp_min(0).square()
+            excess = excess + pose.sum(-1)
+        return self.action_bound_weight * excess * self.dt
 
     def _timeout(self, s1):
         return (self.state.get(s1, "clock").squeeze(-1) >= self.max_steps).to(s1.dtype)
@@ -497,6 +532,9 @@ class RigidObjectMDP:
             "release_opening": self.release_opening,
             "release_temperature": self.release_temperature,
             "success_gradient_scale": self.success_gradient_scale,
+            "action_bound": "imagination-only cost action_bound_weight x squared excess of the raw gripper past gripper_bound and of raw pose axes past input_limit, per second",
+            "action_bound_weight": self.action_bound_weight,
+            "gripper_bound": self.gripper_bound,
             "success_counter_initialization": "native counter at replay start; subsequent imagined increments use the surrogate",
             "reward_weights": self.weights,
             "reward_dt": self.dt,

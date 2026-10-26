@@ -52,12 +52,17 @@ class SquareMDP(RigidObjectMDP):
         insertion_scale,
         grip_band=(0.008, 0.020),
         carry_weight=0.2,
+        early_release_penalty=2.0,
+        action_bound_weight=0.05,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(action_bound_weight=action_bound_weight, **kwargs)
         if not 0 <= carry_weight < float("inf"):
             raise ValueError("carry_weight must be finite and nonnegative")
+        if not 0 <= early_release_penalty < float("inf"):
+            raise ValueError("early_release_penalty must be finite and nonnegative")
         self.carry_weight = float(carry_weight)
+        self.early_release_penalty = float(early_release_penalty)
         self.criteria = criteria
         self.reaching_scale = float(reaching_scale)
         self.alignment_scale, self.tilt_scale = float(alignment_scale), float(tilt_scale)
@@ -79,10 +84,14 @@ class SquareMDP(RigidObjectMDP):
         return _apply_inverse(nut_quat, self.physical_grasp(s, c) - nut)
 
     def _gripping(self, s):
-        """Both fingers closed onto an object: inside the held band, not fully shut."""
+        """Both fingers closed onto an object: inside the held band, not fully shut.
+
+        Straight-through (hard forward, sigmoid band edges backward), so the rewards
+        that need a grasp show the actor that opening the gripper loses them.
+        """
         fingers = self.state.get(s, "robot_q")[:, 6:8]
         low, high = self.grip_band
-        return ((fingers >= low) & (fingers <= high)).all(-1)
+        return self._band(fingers, low, high, self.release_temperature).prod(-1)
 
     def _released(self, s):
         """Not both fingers inside grip_band, the proxy for no nut-robot contact.
@@ -99,7 +108,10 @@ class SquareMDP(RigidObjectMDP):
         return 1 - inside.prod(-1)
 
     def grasp_status(self, s, c):
-        """Proxies for native (legal handle grasp, wrong ring or mixed grasp)."""
+        """Proxies for native (legal handle grasp, wrong ring or mixed grasp).
+
+        The legal grasp is straight-through in the finger band; the wrong grasp is hard.
+        """
         local = self._grasp_local(s, c)
         gripping = self._gripping(s)
         near_slab = local[:, 2].abs() <= 2 * NUT_BOXES[0][1][2]
@@ -109,7 +121,8 @@ class SquareMDP(RigidObjectMDP):
             & (local[:, 1].abs() <= _HANDLE_HALF[1] + self.criteria.contact_tolerance)
         )
         ring = (local[:, 0] < _RING_OUTER) & (local[:, 1].abs() <= _RING_OUTER)
-        return gripping & near_slab & handle, gripping & near_slab & ring
+        legal = gripping * (near_slab & handle).to(gripping.dtype)
+        return legal, (gripping.detach() > 0.5) & near_slab & ring
 
     def _tilt(self, s, c):
         _, nut_quat, _, peg_quat = self._frames(s, c)
@@ -145,7 +158,7 @@ class SquareMDP(RigidObjectMDP):
         provisional = self.state.pack(fields)
         grasped, wrong = self.grasp_status(provisional, c)
         invalid = torch.maximum(self.state.get(s, "invalid"), wrong.to(s.dtype)[:, None])
-        legal = (grasped.to(s.dtype)[:, None]) * (1 - invalid)
+        legal = grasped.detach()[:, None] * (1 - invalid)
         fields["invalid"] = invalid
         fields["grasp_seen"] = torch.maximum(self.state.get(s, "grasp_seen"), legal)
         super().advance_task_fields(fields, s, c)
@@ -201,18 +214,35 @@ class SquareMDP(RigidObjectMDP):
             **self._costs(s, a, s1),
         }
         reward = sum(self.weights[name] * value for name, value in values.items())
-        carried = torch.maximum(grasped, threaded)
+        # A threaded nut counts as carried; otherwise the grasp's derivative applies.
+        carried = threaded + (1 - threaded) * grasped
         reward = (reward + self.carry_weight * carry * carried * valid) * self.dt
+        # Imagination-only: commanding open on a held nut that is not yet on the
+        # peg. The grasped-start categories all taught "open at once" (a nut held
+        # above or on the peg often drops into place), and nothing showed the actor
+        # that the same reflex drops the nut on the table everywhere else. The
+        # straight-through derivative acts on the command itself: through the world
+        # model's finger prediction (trained only at the two binary targets) it was
+        # too weak to leave the open basin.
+        held, _ = self.grasp_status(s, c)
+        nut0, nut_quat0, _, _ = self._frames(s, c)
+        on_peg = threaded_geometry(
+            nut0, nut_quat0, peg, peg_quat, axial_tolerance=self.criteria.max_penetration
+        ).to(s.dtype)
+        early = held.detach() * (1 - on_peg) * self._open_command(a)
+        reward = reward - self.early_release_penalty * early
         done = 1 - (1 - values["success"]) * (1 - invalid) * (1 - self._timeout(s1))
         return reward, done
 
     def task_contract(self):
         return {
             "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, not both fingers inside grip_band (release proxy), grasp_seen and not invalid; no support-force, penetration or contact test",
-            "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band; replaces force-bearing finger contact classification",
+            "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band (the legal grasp straight-through in the band); replaces force-bearing finger contact classification",
             "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
             "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the handle is grasped or the nut threaded; reaching also pays while grasped; handle_grasp and alignment gated off once seated; imagination only",
             "carry_weight": self.carry_weight,
+            "imagined_early_release": "early_release_penalty for commanding open while the handle is grasped and the nut is not threaded; straight-through on the raw gripper command; imagination only",
+            "early_release_penalty": self.early_release_penalty,
             "grip_band": list(self.grip_band),
             "criteria": vars(self.criteria),
             "reward_scales": {
