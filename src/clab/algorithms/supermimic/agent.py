@@ -343,7 +343,7 @@ class SuperMimicAgent:
 
     def update_policy(self, buffer) -> dict[str, float]:
         cfg = self.cfg
-        start = buffer.sample_starts(cfg.policy_batch_size)
+        start = buffer.sample_starts(cfg.policy_batch_size, cfg.reset_start_fraction)
         state, obs, context = start["s"], start["obs"], start["context"]
         rewards, dones, features, disagreements = [], [], [], []
         valid = torch.ones(len(self._IMAGINATION_CHECKS), dtype=torch.bool, device=self.device)

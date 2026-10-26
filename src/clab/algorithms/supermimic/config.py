@@ -36,6 +36,11 @@ class SuperMimicConfig:
     # and subtracts uncertainty_penalty x member disagreement from its reward.
     wm_ensemble_size: int = 1
     uncertainty_penalty: float = 0.0
+    # Fraction of imagination starts drawn from episode-start rows (reset
+    # states) rather than uniformly over replay, where each episode contributes
+    # one start among hundreds of rows. A reset curriculum places its hardest
+    # decisions there (for example whether to keep a grasped object).
+    reset_start_fraction: float = 0.0
 
     def __post_init__(self) -> None:
         for name in ("wm_hidden", "policy_hidden", "critic_hidden"):
@@ -71,6 +76,12 @@ class SuperMimicConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive and finite")
+        if (
+            isinstance(self.reset_start_fraction, bool)
+            or not math.isfinite(self.reset_start_fraction)
+            or not 0 <= self.reset_start_fraction < 1
+        ):
+            raise ValueError("reset_start_fraction must be finite and in [0, 1)")
         if not math.isfinite(self.gamma) or not 0 < self.gamma < 1:
             raise ValueError("gamma must be finite and in (0, 1)")
         if (

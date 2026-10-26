@@ -57,6 +57,7 @@ class ReplayBuffer:
         }.items():
             self.data[key] = torch.zeros(capacity_steps, num_envs, dtype=dtype, device=self.device)
         self._episode_step = torch.zeros(num_envs, dtype=torch.long, device=self.device)
+        self._all_valid = torch.ones(num_envs, dtype=torch.bool, device=self.device)
         self.pinned = None  # Fixed segment after pin(): data, ptr, size, capacity_steps.
 
     @property
@@ -118,7 +119,7 @@ class ReplayBuffer:
                 raise ValueError(f"Replay {key!r} must contain finite floating-point values")
             elif not torch.isfinite(value.to(dtype=storage.dtype)).all():
                 raise ValueError(f"Replay {key!r} cannot be represented in {storage.dtype}")
-        defaults = {"episode_step": self._episode_step, "valid": True}
+        defaults = {"episode_step": self._episode_step, "valid": self._all_valid}
         for key, storage in self.data.items():
             value = transition[key] if key in transition else defaults[key]
             storage[self.ptr].copy_(value.detach())
@@ -195,14 +196,17 @@ class ReplayBuffer:
         out["done"] = done
         return out
 
-    def sample_starts(self, batch_size: int) -> dict:
+    def sample_starts(self, batch_size: int, reset_fraction: float = 0.0) -> dict:
+        """Uniform replay rows, with ``reset_fraction`` of them episode-start rows."""
         segments = [s for s in self._segments() if s[2]]
         if type(batch_size) is not int or batch_size < 1 or not segments:
             raise ValueError(
                 "Replay imagination starts require positive batch_size and nonempty data"
             )
-        counts = self._split(batch_size, [size for _, _, size, _ in segments])
-        parts = []
+        resets = round(batch_size * reset_fraction)
+        parts = self._reset_rows(segments, resets) if resets else []
+        uniform = batch_size - sum(len(part["s"]) for part in parts)
+        counts = self._split(uniform, [size for _, _, size, _ in segments])
         for (data, ptr, size, capacity), count in zip(segments, counts, strict=True):
             if not count:
                 continue
@@ -212,3 +216,24 @@ class ReplayBuffer:
             # The task observation already includes its validated, episode-local history.
             parts.append({key: values[rows, env] for key, values in data.items()})
         return {key: torch.cat([part[key] for part in parts]) for key in parts[0]}
+
+    def _reset_rows(self, segments, count):
+        """``count`` rows drawn uniformly among stored episode starts (none if absent)."""
+        found = []
+        for data, ptr, size, capacity in segments:
+            rows = (ptr - size + torch.arange(size, device=self.device)) % capacity
+            age, env = (data["episode_step"][rows] == 0).nonzero(as_tuple=True)
+            found.append((data, rows[age], env))
+        total = sum(len(env) for _, _, env in found)
+        if not total:
+            return []
+        pick = torch.randint(total, (count,), device=self.device)
+        parts, offset = [], 0
+        for data, rows, env in found:
+            chosen = pick[(pick >= offset) & (pick < offset + len(env))] - offset
+            offset += len(env)
+            if len(chosen):
+                parts.append(
+                    {key: values[rows[chosen], env[chosen]] for key, values in data.items()}
+                )
+        return parts

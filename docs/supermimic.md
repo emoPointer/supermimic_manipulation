@@ -129,6 +129,7 @@ and success.
 | `--exploration-fraction F` | In the first worlds, occasionally flip the gripper command for several steps |
 | `--wm-ensemble-size K --uncertainty-penalty P` | Train K independent world models and penalize their disagreement in imagination |
 | `--policy-update-interval K` | Update actor/critic every K iterations after the world-model-only phase |
+| `--reset-start-fraction F` | Draw a fraction F of imagination starts from episode-start (reset) rows instead of uniformly over replay |
 | `--no-compile-world-model`, `--no-compile-policy-update` | Disable `torch.compile` (slower; useful for debugging) |
 | `--smoke` | Tiny networks and budgets; checks saving, reloading and one more update |
 
