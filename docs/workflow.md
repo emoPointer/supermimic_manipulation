@@ -71,8 +71,11 @@ Results vary strongly between seeds; compare configurations over several seeds.
 clab train ppo --task box_in_bin --reset-bank banks/box_in_bin.pt --run-name s0 --seed 0
 ```
 
-Runs RSL-RL PPO on the same environment, observations and native rewards. Logs go to
-`logs/rsl_rl/<experiment>/<timestamp>_<run-name>/`; `--gpu-ids` trains on several GPUs.
+Runs RSL-RL PPO on the same environment, observations, reset bank and native rewards. Logs
+go to `logs/rsl_rl/<experiment>/<timestamp>_<run-name>/`; `--gpu-ids` trains on several GPUs.
+`--reward imagined` trains instead on the reward SuperMimic optimizes: the task's imagined
+reward (with its imagination-only shaping, see [supermimic.md](supermimic.md)) evaluated on
+each real transition, so both methods optimize the same function.
 
 ## 3. Evaluation
 
