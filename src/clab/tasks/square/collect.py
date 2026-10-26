@@ -4,9 +4,10 @@ Collection disables training randomization, and every grasp needs force-bearing 
 the exposed side handle. The last category starts above the peg and descends under real
 actions (``--descent-steps``, six seconds by default) with bounded lateral corrections from
 the measured nut position; no inserted pose is written into physics.
-``--insertion-per-stage N`` collects N above-peg and N threaded states (``--per-type 2*N``)
-and saves their labels in ``insertion_subtypes``. Above-peg states descend towards a
-15-40 mm nominal tip gap with +/-12 mm XY jitter and must hold without peg contact.
+``--insertion-per-stage N`` collects N near-peg, N above-peg and N threaded states
+(``--per-type 3*N``) and saves their labels in ``insertion_subtypes``. Above-peg states descend
+towards a 15-40 mm nominal tip gap with +/-12 mm XY jitter; near-peg states move to the same
+height 30-100 mm beside the peg. Both must hold without peg contact.
 
 Fresh candidates pass a 1 s reset/reload hold without the descent feedback, meeting the
 per-step predicates for the whole second. Tabletop grasps must also lift the nut 60 mm and
@@ -44,6 +45,9 @@ from .settings import DESCENT_STEPS, RESET_TYPES, AssemblyCriteria
 from .variants import DEFAULT_ROBOT
 
 TABLETOP_REPLAY_PASSES = 4
+# Last-category stages with --insertion-per-stage, in label order.
+INSERTION_STAGES = ("near_peg", "above_peg", "threaded")
+STAGE_SEED_OFFSETS = {"near_peg": 60_000, "above_peg": 50_000, "threaded": 0}
 
 
 @dataclass(frozen=True)
@@ -63,6 +67,7 @@ class AcceptanceConfig:
     above_peg_clearance: tuple[float, float] = (0.015, 0.040)
     above_peg_xy_max: float = 0.02
     above_peg_xy_jitter: float = 0.012
+    near_peg_offset: tuple[float, float] = (0.03, 0.10)
 
 
 @dataclass(frozen=True)
@@ -267,16 +272,23 @@ def accepted(
     if category == 2:
         return valid & ~table & ~peg & (rows["nut_pose"][:, 2] > 0.05)
     relative = rows["nut_pose"][:, :3] - rows["peg_pose"][:, :3]
-    if insertion_stage == "above_peg":
+    if insertion_stage in ("near_peg", "above_peg"):
         from mjlab.utils.lab_api.math import quat_apply_inverse
 
         local = quat_apply_inverse(rows["peg_pose"][:, 3:], relative)
+        lateral = local[:, :2].norm(dim=-1)
+        if insertion_stage == "above_peg":
+            beside = lateral < criteria.above_peg_xy_max
+        else:
+            beside = (lateral > criteria.near_peg_offset[0] - 0.005) & (
+                lateral < criteria.near_peg_offset[1] + 0.01
+            )
         return (
             valid
             & ~table
             & ~peg
             & ~insertion_diagnostic(env)
-            & (local[:, :2].norm(dim=-1) < criteria.above_peg_xy_max)
+            & beside
             & (local[:, 2] > PEG_HALF_HEIGHT + NUT_HALF_HEIGHT)
             & (
                 local[:, 2]
@@ -339,9 +351,9 @@ def collect(
         dict(replay_tested=0, replay_passed=0, lift_passed=0) for _ in range(TABLETOP_REPLAY_PASSES)
     ]
     if insertion_per_stage is not None and (
-        insertion_per_stage < 1 or per_type != 2 * insertion_per_stage
+        insertion_per_stage < 1 or per_type != len(INSERTION_STAGES) * insertion_per_stage
     ):
-        raise ValueError("Mixed insertion requires per_type == 2 * insertion_per_stage > 0")
+        raise ValueError("Mixed insertion requires per_type == 3 * insertion_per_stage > 0")
     if source_bank is not None and insertion_per_stage is None:
         raise ValueError("Reusing first three classes requires explicit insertion_per_stage")
     source = None
@@ -352,8 +364,8 @@ def collect(
             raise ValueError("Source bank must use the current complete-geometry workspace")
         if source["split"] != split:
             raise ValueError("Source split must match the requested output split")
-        if any(len(source_states[k]["joint_pos"]) != per_type for k in RESET_TYPES[:3]):
-            raise ValueError("Source first three categories must each match per_type")
+        if any(len(source_states[k]["joint_pos"]) < per_type for k in RESET_TYPES[:3]):
+            raise ValueError("Source first three categories need at least per_type rows")
         validate_source_grasp_witness(
             source["provenance"], per_type=per_type, proposal=ProposalConfig(), lift=lift
         )
@@ -397,7 +409,7 @@ def collect(
     counts, attempts = dict.fromkeys(RESET_TYPES, 0), dict.fromkeys(RESET_TYPES, 0)
     if source is not None:
         for kind in RESET_TYPES[:3]:
-            collected[kind] = {field: [source_states[kind][field]] for field in FIELDS}
+            collected[kind] = {field: [source_states[kind][field][:per_type]] for field in FIELDS}
             counts[kind] = per_type
     insertion_labels = []
     env = None
@@ -436,8 +448,7 @@ def collect(
         jobs = [(i, kind, "threaded", per_type) for i, kind in enumerate(RESET_TYPES)]
         if insertion_per_stage is not None:
             jobs[-1:] = [
-                (3, RESET_TYPES[3], "above_peg", insertion_per_stage),
-                (3, RESET_TYPES[3], "threaded", insertion_per_stage),
+                (3, RESET_TYPES[3], stage, insertion_per_stage) for stage in INSERTION_STAGES
             ]
         for category, kind, insertion_stage, target_count in jobs:
             if source is not None and category < 3:
@@ -450,10 +461,7 @@ def collect(
                     break
                 candidates = sampler.batch(kind, num_envs, max_attempts=500 * num_envs)
                 env.reset(
-                    seed=seed
-                    + category * 100_000
-                    + batch
-                    + (50_000 if insertion_stage == "above_peg" else 0)
+                    seed=seed + category * 100_000 + batch + STAGE_SEED_OFFSETS[insertion_stage]
                 )
                 write_states(env, {k: v.to(device) for k, v in candidates.items()})
                 env.scene.write_data_to_sim()
@@ -496,7 +504,7 @@ def collect(
                     heights = torch.empty(num_envs, device=device).uniform_(
                         *(
                             criteria.above_peg_clearance
-                            if insertion_stage == "above_peg"
+                            if insertion_stage in ("near_peg", "above_peg")
                             else criteria.insertion_height
                         )
                     )
@@ -506,8 +514,15 @@ def collect(
                         delta[:, :2] += torch.empty_like(delta[:, :2]).uniform_(
                             -criteria.above_peg_xy_jitter, criteria.above_peg_xy_jitter
                         )
+                    elif insertion_stage == "near_peg":
+                        angle = torch.empty(num_envs, device=device).uniform_(-math.pi, math.pi)
+                        radius = torch.empty(num_envs, device=device).uniform_(
+                            *criteria.near_peg_offset
+                        )
+                        delta[:, 0] += radius * torch.cos(angle)
+                        delta[:, 1] += radius * torch.sin(angle)
                     delta[:, 2] = heights - reached["nut_pose"][:, 2]
-                    if insertion_stage == "above_peg":
+                    if insertion_stage in ("near_peg", "above_peg"):
                         delta[:, 2] += reached["peg_pose"][:, 2] + PEG_HALF_HEIGHT + NUT_HALF_HEIGHT
                     correction = torch.zeros_like(target_pos[:, :2])
                     for index in range(descent_steps):
@@ -524,7 +539,7 @@ def collect(
                         good &= within_workspace(snapshot(env), sampler.workspace_corners)
                         handle, wrong = handle_grasp_status(env, AssemblyCriteria())
                         good &= handle & ~wrong
-                        if insertion_stage == "above_peg":
+                        if insertion_stage in ("near_peg", "above_peg"):
                             good &= ~insertion_diagnostic(env) & ~contact_found(
                                 env, "nut_peg_contact"
                             )
@@ -632,7 +647,9 @@ def collect(
                     if category == 3 and insertion_per_stage is not None:
                         insertion_labels.append(
                             torch.full(
-                                (take,), int(insertion_stage == "threaded"), dtype=torch.int64
+                                (take,),
+                                INSERTION_STAGES.index(insertion_stage),
+                                dtype=torch.int64,
                             )
                         )
                 counts[kind] += take
@@ -732,13 +749,13 @@ def collect(
         }
     if insertion_per_stage is not None:
         bank["insertion_subtypes"] = {
-            "names": ["above_peg", "threaded"],
+            "names": list(INSERTION_STAGES),
             "labels": torch.cat(insertion_labels),
-            "counts": [insertion_per_stage, insertion_per_stage],
+            "counts": [insertion_per_stage] * len(INSERTION_STAGES),
         }
         bank["provenance"]["insertion_subtypes"] = {
-            "names": ["above_peg", "threaded"],
-            "counts": [insertion_per_stage, insertion_per_stage],
+            "names": list(INSERTION_STAGES),
+            "counts": [insertion_per_stage] * len(INSERTION_STAGES),
             "label_field": "insertion_subtypes.labels",
             "legacy_category_key": RESET_TYPES[3],
         }

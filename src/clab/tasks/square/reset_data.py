@@ -27,17 +27,18 @@ def validate_bank(bank, model=None):
     subtypes = bank.get("insertion_subtypes")
     if subtypes is not None:
         labels = subtypes.get("labels")
+        names = subtypes.get("names")
         count = len(states[RESET_TYPES[3]]["joint_pos"])
         if (
-            subtypes.get("names") != ["above_peg", "threaded"]
+            names not in (["near_peg", "above_peg", "threaded"], ["above_peg", "threaded"])
             or not isinstance(labels, torch.Tensor)
             or labels.device.type != "cpu"
             or labels.dtype != torch.int64
             or labels.shape != (count,)
-            or not bool(((labels == 0) | (labels == 1)).all())
+            or not bool(((labels >= 0) & (labels < len(names))).all())
         ):
             raise ValueError("Invalid Square insertion subtype labels")
-        counts = torch.bincount(labels, minlength=2).tolist()
+        counts = torch.bincount(labels, minlength=len(names)).tolist()
         if min(counts) < 1 or counts != subtypes.get("counts"):
             raise ValueError("Square insertion subtype counts must match their labels")
     return states

@@ -105,7 +105,8 @@ hovering an open gripper at the handle paid more than holding it). MugHang's nat
 while the handle is misaligned with the bar, so its imagination also adds a long-range pull of
 the handle toward the hanging target, `carry_weight` (0.2) × exp(−distance / 1 m). Square's
 alignment and insertion terms are 3 cm Gaussians, so its imagination likewise pulls the nut toward
-the nearer of an above-peg pose and the seated pose. Drawer's
+the nearer of an above-peg pose and the seated pose while the handle is grasped or the nut
+threaded. Drawer's
 native progress restarts at every stage (lift, place, close), so completing a stage would lower
 the reward; its imagined progress adds the number of completed stages instead.
 

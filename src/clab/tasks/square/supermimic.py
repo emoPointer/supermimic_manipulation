@@ -181,7 +181,8 @@ class SquareMDP(RigidObjectMDP):
         # Imagination-only shaping. The native alignment and insertion terms are
         # 3 cm Gaussians, flat at the ~12 cm start of a carry, so pull the nut
         # toward the nearer of the above-peg and seated poses (descending onto
-        # the peg never lowers it). Once seated, holding the handle stops paying.
+        # the peg never lowers it) while it is held by the handle or threaded,
+        # not when shoved across the table. Once seated, holding stops paying.
         above_target = peg + quat_apply(
             peg_quat, peg.new_tensor((0.0, 0.0, _ABOVE_PEG)).expand_as(peg)
         )
@@ -200,7 +201,8 @@ class SquareMDP(RigidObjectMDP):
             **self._costs(s, a, s1),
         }
         reward = sum(self.weights[name] * value for name, value in values.items())
-        reward = (reward + self.carry_weight * carry * valid) * self.dt
+        carried = torch.maximum(grasped, threaded)
+        reward = (reward + self.carry_weight * carry * carried * valid) * self.dt
         done = 1 - (1 - values["success"]) * (1 - invalid) * (1 - self._timeout(s1))
         return reward, done
 
@@ -209,7 +211,7 @@ class SquareMDP(RigidObjectMDP):
             "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, not both fingers inside grip_band (release proxy), grasp_seen and not invalid; no support-force, penetration or contact test",
             "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band; replaces force-bearing finger contact classification",
             "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
-            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added; reaching also pays while grasped; handle_grasp and alignment gated off once seated; imagination only",
+            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the handle is grasped or the nut threaded; reaching also pays while grasped; handle_grasp and alignment gated off once seated; imagination only",
             "carry_weight": self.carry_weight,
             "grip_band": list(self.grip_band),
             "criteria": vars(self.criteria),

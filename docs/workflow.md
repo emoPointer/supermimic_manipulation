@@ -30,7 +30,9 @@ training keeps it.
 | `--cuda-graph-mode plain` | Use plain CUDA graphs (needed on drivers older than CUDA 12.4) |
 
 Square and MugHang build their insertion/threading categories in stages
-(`--insertion-per-stage`). Drawer records complete physical trajectories and saves six
+(`--insertion-per-stage`); for Square use it (for example `--per-type 9999
+--insertion-per-stage 3333`), since the near-peg and above-peg stages bridge the gap
+between the far carries and insertion. Drawer records complete physical trajectories and saves six
 snapshots from each, so it is the slowest collector; a few thousand states per category
 are enough for training.
 
