@@ -53,16 +53,29 @@ class SquareMDP(RigidObjectMDP):
         grip_band=(0.008, 0.020),
         carry_weight=0.2,
         early_release_penalty=2.0,
-        action_bound_weight=0.05,
+        release_radius=0.01,
+        peg_hold_cost=2.0,
+        action_bound_weight=0.2,
+        gripper_gradient_bound=3.0,
         **kwargs,
     ):
-        super().__init__(action_bound_weight=action_bound_weight, **kwargs)
-        if not 0 <= carry_weight < float("inf"):
-            raise ValueError("carry_weight must be finite and nonnegative")
-        if not 0 <= early_release_penalty < float("inf"):
-            raise ValueError("early_release_penalty must be finite and nonnegative")
+        super().__init__(
+            action_bound_weight=action_bound_weight,
+            gripper_gradient_bound=gripper_gradient_bound,
+            **kwargs,
+        )
+        for name, value in (
+            ("carry_weight", carry_weight),
+            ("early_release_penalty", early_release_penalty),
+            ("release_radius", release_radius),
+            ("peg_hold_cost", peg_hold_cost),
+        ):
+            if not 0 <= value < float("inf"):
+                raise ValueError(f"{name} must be finite and nonnegative")
         self.carry_weight = float(carry_weight)
         self.early_release_penalty = float(early_release_penalty)
+        self.release_radius = float(release_radius)
+        self.peg_hold_cost = float(peg_hold_cost)
         self.criteria = criteria
         self.reaching_scale = float(reaching_scale)
         self.alignment_scale, self.tilt_scale = float(alignment_scale), float(tilt_scale)
@@ -195,7 +208,7 @@ class SquareMDP(RigidObjectMDP):
         # 3 cm Gaussians, flat at the ~12 cm start of a carry, so pull the nut
         # toward the nearer of the above-peg and seated poses (descending onto
         # the peg never lowers it) while it is held by the handle or threaded,
-        # not when shoved across the table. Once seated, holding stops paying.
+        # not when shoved across the table.
         above_target = peg + quat_apply(
             peg_quat, peg.new_tensor((0.0, 0.0, _ABOVE_PEG)).expand_as(peg)
         )
@@ -205,8 +218,11 @@ class SquareMDP(RigidObjectMDP):
         candidate = self._candidate(s1, c)
         values = {
             "reaching": (1 - torch.tanh(distance / self.reaching_scale)) * approach,
-            "handle_grasp": grasped * valid * (1 - seated),
-            "alignment": alignment * grasped * valid * (1 - seated),
+            # Imagination-only: holding stops paying once the nut is on the peg
+            # (natively once seated). Pushing a threaded nut down by its handle
+            # tilts and jams it; released, it slides down and seats.
+            "handle_grasp": grasped * valid * (1 - threaded),
+            "alignment": alignment * grasped * valid * (1 - threaded),
             "insertion": insertion * threaded * grasp_seen * valid,
             "release": candidate,
             "invalid_grasp": invalid,
@@ -217,20 +233,26 @@ class SquareMDP(RigidObjectMDP):
         # A threaded nut counts as carried; otherwise the grasp's derivative applies.
         carried = threaded + (1 - threaded) * grasped
         reward = (reward + self.carry_weight * carry * carried * valid) * self.dt
-        # Imagination-only: commanding open on a held nut that is not yet on the
-        # peg. The grasped-start categories all taught "open at once" (a nut held
-        # above or on the peg often drops into place), and nothing showed the actor
-        # that the same reflex drops the nut on the table everywhere else. The
-        # straight-through derivative acts on the command itself: through the world
-        # model's finger prediction (trained only at the two binary targets) it was
-        # too weak to leave the open basin.
+        # Imagination-only release shaping on the raw gripper command, whose
+        # straight-through derivative acts directly (through the world model's
+        # finger prediction, trained only at the two binary targets, it was too
+        # weak to change a decision). The grasped-start categories all taught
+        # "open at once": a nut over the peg drops and self-centres, and nothing
+        # showed that the same reflex drops it on the table elsewhere. Opening a
+        # held nut away from the peg (not threaded, centre beyond release_radius
+        # of the axis) costs early_release_penalty; keeping the gripper closed
+        # while the nut is threaded costs peg_hold_cost per second.
         held, _ = self.grasp_status(s, c)
         nut0, nut_quat0, _, _ = self._frames(s, c)
         on_peg = threaded_geometry(
             nut0, nut_quat0, peg, peg_quat, axial_tolerance=self.criteria.max_penetration
         ).to(s.dtype)
-        early = held.detach() * (1 - on_peg) * self._open_command(a)
+        axis = _apply_inverse(peg_quat, nut0 - peg)[:, :2].norm(dim=-1)
+        over_peg = (axis < self.release_radius).to(s.dtype)
+        opening = self._open_command(a)
+        early = held.detach() * (1 - on_peg) * (1 - over_peg) * opening
         reward = reward - self.early_release_penalty * early
+        reward = reward - self.peg_hold_cost * on_peg * (1 - opening) * self.dt
         done = 1 - (1 - values["success"]) * (1 - invalid) * (1 - self._timeout(s1))
         return reward, done
 
@@ -239,10 +261,13 @@ class SquareMDP(RigidObjectMDP):
             "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, not both fingers inside grip_band (release proxy), grasp_seen and not invalid; no support-force, penetration or contact test",
             "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band (the legal grasp straight-through in the band); replaces force-bearing finger contact classification",
             "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
-            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the handle is grasped or the nut threaded; reaching also pays while grasped; handle_grasp and alignment gated off once seated; imagination only",
+            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the handle is grasped or the nut threaded; reaching also pays while grasped; handle_grasp and alignment gated off once threaded; imagination only",
             "carry_weight": self.carry_weight,
-            "imagined_early_release": "early_release_penalty for commanding open while the handle is grasped and the nut is not threaded; straight-through on the raw gripper command; imagination only",
+            "imagined_early_release": "early_release_penalty for commanding open while the handle is grasped, the nut is not threaded and its centre is beyond release_radius of the peg axis; straight-through on the raw gripper command; imagination only",
             "early_release_penalty": self.early_release_penalty,
+            "release_radius": self.release_radius,
+            "imagined_peg_release": "peg_hold_cost per second for commanding closed while the nut is threaded; straight-through on the raw gripper command; imagination only",
+            "peg_hold_cost": self.peg_hold_cost,
             "grip_band": list(self.grip_band),
             "criteria": vars(self.criteria),
             "reward_scales": {

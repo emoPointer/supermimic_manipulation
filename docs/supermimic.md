@@ -99,9 +99,9 @@ Common to all tasks:
 BoxInBin, Lemon and MugHang add one imagination-only shaping term: once the object is
 placed, reaching stops paying and `release_weight` (0.2) × the finger opening fraction from
 the held width to the release opening is added, so holding on stops being rewarded. Square
-and Drawer already have native release terms; for Square, holding the handle stops paying once
-the nut is seated, and reaching keeps paying while the handle is grasped (natively it stops, so
-hovering an open gripper at the handle paid more than holding it). MugHang's native threading term vanishes
+and Drawer already have native release terms; for Square, reaching keeps paying while the
+handle is grasped (natively it stops, so hovering an open gripper at the handle paid more than
+holding it) until the nut is seated, and holding stops paying once the nut is threaded (below). MugHang's native threading term vanishes
 while the handle is misaligned with the bar, so its imagination also adds a long-range pull of
 the handle toward the hanging target, `carry_weight` (0.2) × exp(−distance / 1 m). Square's
 alignment and insertion terms are 3 cm Gaussians, so its imagination likewise pulls the nut toward
@@ -123,21 +123,28 @@ target improved the smooth terms.
   derivative of the active stage's failure condition (grasp lost after it was confirmed but
   before the lift, pod released outside the drawer, pod re-grasped or outside the drawer while
   closing), so the actor sees that failing forfeits the rest of the imagined return.
-- Square adds `early_release_penalty` (2) for commanding the gripper open while the handle is
-  grasped and the nut is not threaded, straight-through on the raw command itself. A nut held
-  above or on the peg often drops into place, so those starts taught "open at once"; elsewhere
-  the same reflex drops the nut on the table. Through the world model's finger prediction,
-  which is trained only at the two binary targets, the derivative was too weak to undo that.
-- Both set `action_bound_weight` (0.05, per second; 0 elsewhere): a squared cost on the raw
-  gripper command beyond ±`gripper_bound` (3) and on raw pose axes beyond the controller's input
-  limit. The binary gripper's sigmoid derivative vanishes far from zero and the clip has none
-  past the limit, so a saturated command (Square's reached +12) could no longer change.
+- Square shapes the release on the raw gripper command, whose straight-through derivative
+  acts directly; through the world model's finger prediction, which is trained only at the two
+  binary targets, the derivative was too weak to change a decision. A nut over the peg drops
+  and self-centres, so the grasped starts taught "open at once", which drops the nut on the
+  table everywhere else. Commanding open on a held nut away from the peg (not threaded, centre
+  beyond `release_radius`, 1 cm, of the axis) costs `early_release_penalty` (2); commanding
+  closed while the nut is threaded costs `peg_hold_cost` (2 per second); and holding stops
+  paying once the nut is threaded (natively once seated), since pushing a threaded nut down by
+  its handle tilts and jams it, while released it slides down and seats.
+- Both set `action_bound_weight` (Square 0.2, Drawer 0.05, per second; 0 elsewhere): a squared
+  cost on the raw gripper command beyond ±`gripper_bound` (3) and on raw pose axes beyond the
+  controller's input limit. The binary gripper's sigmoid derivative vanishes far from zero and
+  the clip has none past the limit, so a saturated command (Square's reached +12, then −5)
+  could no longer change. Square also sets `gripper_gradient_bound` (3; 0 elsewhere): the
+  sigmoid derivative is taken at the raw command clamped to that bound, so it never vanishes.
 
 These settings are recorded in `params/mdp.json` and can be overridden with
 `--adapter-option NAME=VALUE` (`stable_linear_speed`, `stable_angular_speed`,
 `release_opening`, `release_weight`, `success_gradient_scale`, `action_bound_weight`,
-`gripper_bound`; Lemon also `contact_margin`, MugHang and Square also `carry_weight`, Square
-also `early_release_penalty`, Drawer also `grasp_radius`). Real collection and evaluation always use the native reward
+`gripper_bound`, `gripper_gradient_bound`; Lemon also `contact_margin`, MugHang and Square
+also `carry_weight`, Square also `early_release_penalty`, `release_radius` and `peg_hold_cost`,
+Drawer also `grasp_radius`). Real collection and evaluation always use the native reward
 and success.
 
 ## Options and diagnostics
