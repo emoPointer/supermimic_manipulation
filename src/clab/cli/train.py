@@ -84,6 +84,12 @@ def supermimic(argv: list[str], prog: str) -> None:
         "stable_angular_speed, release_opening, release_weight, success_gradient_scale; "
         "see docs/supermimic.md for task-specific settings)",
     )
+    parser.add_argument(
+        "--full-task-resets",
+        action="store_true",
+        help="Start every episode from reset category 0, the full task (ablation of the "
+        "reset categories; evaluation still uses every category)",
+    )
     for field, default in asdict(RunConfig()).items():
         _add_field(parser, field, default)
     for field, default in asdict(SuperMimicConfig()).items():
@@ -118,6 +124,7 @@ def supermimic(argv: list[str], prog: str) -> None:
         cuda_graph_mode=args.cuda_graph_mode,
         smoke=args.smoke,
         adapter_options=options,
+        full_task_resets=args.full_task_resets,
     )
 
 
