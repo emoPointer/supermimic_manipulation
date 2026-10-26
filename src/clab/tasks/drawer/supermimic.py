@@ -55,10 +55,25 @@ class DrawerMDP(RigidObjectMDP):
         grip_band=(0.018, 0.030),
         grasp_radius=0.03,
         panel_reach=(-0.005, 0.03),
-        action_bound_weight=0.05,
+        outside_release_penalty=2.0,
+        inside_hold_cost=2.0,
+        action_bound_weight=0.2,
+        gripper_gradient_bound=3.0,
         **kwargs,
     ):
-        super().__init__(action_bound_weight=action_bound_weight, **kwargs)
+        super().__init__(
+            action_bound_weight=action_bound_weight,
+            gripper_gradient_bound=gripper_gradient_bound,
+            **kwargs,
+        )
+        for name, value in (
+            ("outside_release_penalty", outside_release_penalty),
+            ("inside_hold_cost", inside_hold_cost),
+        ):
+            if not 0 <= value < float("inf"):
+                raise ValueError(f"{name} must be finite and nonnegative")
+        self.outside_release_penalty = float(outside_release_penalty)
+        self.inside_hold_cost = float(inside_hold_cost)
         self.grip_band = tuple(float(v) for v in grip_band)
         self.grasp_radius = float(grasp_radius)
         self.panel_reach = tuple(float(v) for v in panel_reach)
@@ -272,6 +287,23 @@ class DrawerMDP(RigidObjectMDP):
             **self._costs(s, a, s1),
         }
         reward = sum(self.weights[name] * value for name, value in values.items()) * self.dt
+        # Imagination-only release shaping on the raw gripper command, whose
+        # straight-through derivative acts directly; the failure hazard reaches the
+        # command only through the world model's finger prediction (trained at the
+        # two binary targets), which left the decision at the open/closed boundary
+        # and the pod dropped above the drawer. In the release stage, opening a
+        # held pod outside the drawer costs outside_release_penalty and keeping
+        # the gripper closed once the pod is inside costs inside_hold_cost per
+        # second (natively nothing pays for letting go until the stage advances).
+        releasing = (self._field(s, "stage").round() == 1).to(s.dtype)
+        releasing = releasing * (1 - self._field(s, "failed"))
+        held, _ = self.contacts(s, c)
+        local0, height0, slide0, _ = self._geometry(s, c)
+        inside0 = pod_inside(local0, height0, slide0).to(s.dtype)
+        opening = self._open_command(a)
+        outside = releasing * held.detach() * (1 - inside0) * opening
+        reward = reward - self.outside_release_penalty * outside
+        reward = reward - self.inside_hold_cost * releasing * inside0 * (1 - opening) * self.dt
         failed = self._failure(s, s1, c)
         done = 1 - (1 - values["success"]) * (1 - failed) * (1 - self._timeout(s1))
         return reward, done
@@ -281,6 +313,9 @@ class DrawerMDP(RigidObjectMDP):
             "imagined_success": "native PhysicalSequence update and final predicate on predicted states; pod grasp and drawer contact replaced by geometric proxies",
             "imagined_grasp": "physical grasp point within grasp_radius of the pod centre and both fingers within grip_band (straight-through in the band)",
             "imagined_failure": "done uses the native failure event (failed latch turning on) forward and the derivative of the active stage's failure condition backward, through straight-through grasp and inside gates",
+            "imagined_release": "in the release stage: outside_release_penalty for commanding open while the pod is held outside the drawer, inside_hold_cost per second for commanding closed while the pod is inside; straight-through on the raw gripper command; imagination only",
+            "outside_release_penalty": self.outside_release_penalty,
+            "inside_hold_cost": self.inside_hold_cost,
             "imagined_drawer_contact": "physical grasp point within panel_reach of the front panel outer face, inside its width and height",
             "grip_band": list(self.grip_band),
             "grasp_radius": self.grasp_radius,

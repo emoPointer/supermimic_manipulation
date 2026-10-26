@@ -122,7 +122,11 @@ target improved the smooth terms.
 - Drawer's `done` uses the native failure event in the forward pass. Backward, it uses the
   derivative of the active stage's failure condition (grasp lost after it was confirmed but
   before the lift, pod released outside the drawer, pod re-grasped or outside the drawer while
-  closing), so the actor sees that failing forfeits the rest of the imagined return.
+  closing), so the actor sees that failing forfeits the rest of the imagined return. That
+  derivative still reaches the gripper only through the world model's finger prediction, so
+  in the release stage Drawer also shapes the raw command: opening a held pod outside the
+  drawer costs `outside_release_penalty` (2) and keeping the gripper closed once the pod is
+  inside costs `inside_hold_cost` (2 per second).
 - Square shapes the release on the raw gripper command, whose straight-through derivative
   acts directly; through the world model's finger prediction, which is trained only at the two
   binary targets, the derivative was too weak to change a decision. A nut over the peg drops
@@ -132,11 +136,11 @@ target improved the smooth terms.
   closed while the nut is threaded costs `peg_hold_cost` (2 per second); and holding stops
   paying once the nut is threaded (natively once seated), since pushing a threaded nut down by
   its handle tilts and jams it, while released it slides down and seats.
-- Both set `action_bound_weight` (Square 0.2, Drawer 0.05, per second; 0 elsewhere): a squared
+- Both set `action_bound_weight` (0.2 per second; 0 elsewhere): a squared
   cost on the raw gripper command beyond ±`gripper_bound` (3) and on raw pose axes beyond the
   controller's input limit. The binary gripper's sigmoid derivative vanishes far from zero and
   the clip has none past the limit, so a saturated command (Square's reached +12, then −5)
-  could no longer change. Square also sets `gripper_gradient_bound` (3; 0 elsewhere): the
+  could no longer change. Both also set `gripper_gradient_bound` (3; 0 elsewhere): the
   sigmoid derivative is taken at the raw command clamped to that bound, so it never vanishes.
 
 These settings are recorded in `params/mdp.json` and can be overridden with
@@ -144,7 +148,7 @@ These settings are recorded in `params/mdp.json` and can be overridden with
 `release_opening`, `release_weight`, `success_gradient_scale`, `action_bound_weight`,
 `gripper_bound`, `gripper_gradient_bound`; Lemon also `contact_margin`, MugHang and Square
 also `carry_weight`, Square also `early_release_penalty`, `release_radius` and `peg_hold_cost`,
-Drawer also `grasp_radius`). Real collection and evaluation always use the native reward
+Drawer also `grasp_radius`, `outside_release_penalty` and `inside_hold_cost`). Real collection and evaluation always use the native reward
 and success.
 
 ## Options and diagnostics
