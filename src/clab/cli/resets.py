@@ -1,4 +1,4 @@
-"""``clab resets collect``: collect a task's reset bank."""
+"""``clab resets collect``: collect a task's reset bank; ``pregrasp`` derives a category."""
 
 from __future__ import annotations
 
@@ -18,3 +18,10 @@ def collect(argv: list[str], prog: str) -> None:
         print(f"Run '{prog} --task TASK --help' for a task's collection options.")
         raise SystemExit(0 if {"-h", "--help"} & set(rest) else 2)
     load_task(args.task).module("collect").main(rest, prog=f"{prog} --task {args.task}")
+
+
+def pregrasp(argv: list[str], prog: str) -> None:
+    """Append the open-gripper pre-grasp category to a bank collected without it."""
+    from clab.tasks.pregrasp import main
+
+    main(argv, prog=prog)

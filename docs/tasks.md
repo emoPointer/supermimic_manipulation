@@ -80,7 +80,7 @@ Grasp the square nut by its protruding handle and thread it onto the fixed peg.
 | Rewards | `reaching` 0.2, `handle_grasp` 0.1, `alignment` 0.1, `insertion` 0.2, `release` 0.1, the shared action/joint costs, `success` +10, `invalid_grasp` −2 |
 | Success | Peg threaded through the hole; nut seated at peg-local Z = −0.02 m (±2 mm) with tilt ≤ 5°; base support ≥ 0.05 N; robot fully released; speeds ≤ 0.01 m/s and 0.1 rad/s; object contact penetration ≤ 1 mm; a legal handle grasp observed earlier in the episode (the grasped categories start from a verified legal handle grasp, which counts); held 0.5 s |
 | Failure | Grasping the ring body (or a mixed handle/ring grasp) with both fingers ends the episode with −2 |
-| Reset types | `NutRestingEEAnywhere`, `NutRestingHandleGrasped`, `NutAirborneHandleGrasped`, `NutPartiallyInsertedHandleGrasped`; with `--insertion-per-stage` the last category mixes `near_peg` (held 3–10 cm beside the peg, above its top), `above_peg` and `threaded` starts, an intermediate curriculum between the far carries and insertion |
+| Reset types | `NutRestingEEAnywhere`, `NutRestingHandleGrasped`, `NutAirborneHandleGrasped`, `NutPartiallyInsertedHandleGrasped`, `NutRestingEEPregrasp` (open hand 1–6 cm above the handle of a resting nut, derived from `NutRestingHandleGrasped`; see below); with `--insertion-per-stage` the last category mixes `near_peg` (held 3–10 cm beside the peg, above its top), `above_peg` and `threaded` starts, an intermediate curriculum between the far carries and insertion |
 | Bank frame | Environment-world poses |
 | Reset placement | Nut X [0.235, 0.295], Y [−0.090, −0.010], yaw [135°, 225°]; peg X [0.235, 0.295], Y [0.050, 0.110], yaw ±45°; footprints at least 3 cm apart in Y |
 
@@ -124,9 +124,10 @@ Pick up a coffee pod, put it into an already opened drawer, and push the drawer 
 | Reset placement | Pod X [0.075, 0.205], Y [0.090, 0.250], yaw ±18°; housing X [0.325, 0.335], Y [−0.080, −0.040], yaw [165°, 195°] |
 
 Drawer is a long-horizon task, so its reset bank holds six snapshots of one complete
-physical trajectory. Later stages shorten the credit-assignment distance; the process
-milestones already achieved in the trajectory (grasp/lift, inside release) are restored as
-inherited flags, never counted as new accomplishments.
+physical trajectory, plus a pre-grasp state derived from the grasped snapshot (see below).
+Later stages shorten the credit-assignment distance; the process milestones already achieved
+in the trajectory (grasp/lift, inside release) are restored as inherited flags, never counted
+as new accomplishments.
 
 | Category | Snapshot | Inherited grasp/lift, release |
 | --- | --- | --- |
@@ -136,6 +137,20 @@ inherited flags, never counted as new accomplishments.
 | `PodHeldAboveOpenDrawer` | Pod held above the open drawer | yes, no |
 | `PodReleasedInOpenDrawer` | Pod released inside the drawer | yes, yes |
 | `DrawerHalfClosed` | Drawer pushed to 0.07 m | yes, yes |
+| `DrawerOpenedPodPregrasp` | Open hand 1–6 cm above the resting pod (derived) | no, no |
+
+**Pre-grasp category (Square, Drawer).** Without it nothing bridged the full task (gripper
+free, often half a metre away) and the first grasped category: the full-task policy never
+opened its hand at the object, so the critic never valued doing so. `clab.tasks.pregrasp`
+derives each row physically from a grasped-on-table row: open the gripper, re-aim at the same
+object-frame grasp point (opening can shift the object), rise straight up, move to a random
+offset (up to ±1 cm sideways, 1–6 cm up) and hold 0.5 s. A row is kept only if the object
+then rests stably and level, no finger touches it (or, in Square, the ring or the peg; in
+Drawer, the drawer, whose slide must not move) during the hold, both fingers are open and the
+grasp point is above the handle or pod. The saved row is the actual end state. Drawer derives
+one row per trajectory and drops a trajectory from every category if all attempts fail, so
+the categories stay paired; Square draws fresh offsets until the category has as many rows
+as its source. The category is last, so the collected categories keep their indices.
 
 Drawer uses convex-decomposed finger collisions so the finger grooves are not filled by a
 single convex hull; the other tasks use one convex hull per finger.

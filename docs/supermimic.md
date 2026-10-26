@@ -112,6 +112,14 @@ the reward; its imagined progress adds the number of completed stages instead, a
 closing-stage reaching target sits 2 cm in front of the panel (natively on it), since a hand left
 inside the drawer pushed it only part-way before jamming against the housing.
 
+In Square and Drawer the full-task policy closed its gripper on the first step and never
+opened it again: a closed hand beside the object, which cannot grasp it, was paid the same
+reaching reward as an open one. Their imagined reaching therefore pays only an open hand (both
+fingers past the grip band) or a grasp; Drawer applies this before the closing stage, where
+pushing with a closed hand is fine. Their native reaching tanh (5 cm for Square, 10 cm for
+Drawer) is flat at the ~0.5 m full-task start, so their imagination adds a far term
+1 − tanh(distance / `far_reaching_scale`, 0.5 m) toward the handle or pod.
+
 Square and Drawer also make letting go visible to the actor. Without this, every grasped start
 category ended with the gripper opened on the first step: the grasp tests and Drawer's failure
 latch are hard, so their derivative is zero, while the dropped object falling toward its
@@ -124,9 +132,10 @@ target improved the smooth terms.
   before the lift, pod released outside the drawer, pod re-grasped or outside the drawer while
   closing), so the actor sees that failing forfeits the rest of the imagined return. That
   derivative still reaches the gripper only through the world model's finger prediction, so
-  in the release stage Drawer also shapes the raw command: opening a held pod outside the
-  drawer costs `outside_release_penalty` (2) and keeping the gripper closed once the pod is
-  inside costs `inside_hold_cost` (2 per second).
+  Drawer also shapes the raw command: opening a held pod costs `outside_release_penalty` (2)
+  in the lift stage and, in the release stage, outside the drawer; keeping the gripper closed
+  once the pod is inside costs `inside_hold_cost` (2 per second). Without the lift-stage cost
+  the grasped-on-table starts learned to open at once, which fails natively.
 - Square shapes the release on the raw gripper command, whose straight-through derivative
   acts directly; through the world model's finger prediction, which is trained only at the two
   binary targets, the derivative was too weak to change a decision. A nut over the peg drops

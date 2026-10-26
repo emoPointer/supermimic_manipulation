@@ -20,6 +20,11 @@ COMMANDS = {
     },
     "resets": {
         "collect": ("clab.cli.resets", "collect", "Collect a reset bank for a task"),
+        "pregrasp": (
+            "clab.cli.resets",
+            "pregrasp",
+            "Append the derived pre-grasp category (Square, Drawer)",
+        ),
     },
 }
 

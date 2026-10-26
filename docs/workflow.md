@@ -36,6 +36,14 @@ between the far carries and insertion. Drawer records complete physical trajecto
 snapshots from each, so it is the slowest collector; a few thousand states per category
 are enough for training.
 
+The Square and Drawer collectors finish by deriving their pre-grasp category from the
+grasped-on-table rows (see [tasks.md](tasks.md)). A bank collected before that category
+existed can be completed without recollecting:
+
+```bash
+clab resets pregrasp --task square --source banks/square_old.pt --output banks/square.pt
+```
+
 A bank records the controller and timing it was collected with. Training refuses a bank
 whose controller, physics step or decimation differ from the current task.
 

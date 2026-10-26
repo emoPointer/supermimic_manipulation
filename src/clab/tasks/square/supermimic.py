@@ -47,6 +47,7 @@ class SquareMDP(RigidObjectMDP):
         *,
         criteria,
         reaching_scale,
+        far_reaching_scale=0.5,
         alignment_scale,
         tilt_scale,
         insertion_scale,
@@ -73,6 +74,9 @@ class SquareMDP(RigidObjectMDP):
         self.peg_hold_cost = float(peg_hold_cost)
         self.criteria = criteria
         self.reaching_scale = float(reaching_scale)
+        self.far_reaching_scale = float(far_reaching_scale)
+        if not 0 < self.far_reaching_scale < float("inf"):
+            raise ValueError("far_reaching_scale must be finite and positive")
         self.alignment_scale, self.tilt_scale = float(alignment_scale), float(tilt_scale)
         self.insertion_scale = float(insertion_scale)
         self.grip_band = tuple(float(value) for value in grip_band)
@@ -100,6 +104,11 @@ class SquareMDP(RigidObjectMDP):
         fingers = self.state.get(s, "robot_q")[:, 6:8]
         low, high = self.grip_band
         return self._band(fingers, low, high, self.release_temperature).prod(-1)
+
+    def _open(self, s):
+        """Both fingers opened past grip_band, ready to close around the handle."""
+        fingers = self.state.get(s, "robot_q")[:, 6:8]
+        return self._gate(fingers - self.grip_band[1], self.release_temperature).prod(-1)
 
     def _released(self, s):
         """Not both fingers inside grip_band, the proxy for no nut-robot contact.
@@ -184,6 +193,10 @@ class SquareMDP(RigidObjectMDP):
         # holding it (handle_grasp 0.1) and the policy released at once. Keep
         # paying reaching while grasped; it still stops once the nut is seated.
         approach = valid * (1 - seated * grasp_seen)
+        # Imagination-only: reaching pays only an open hand or a legal grasp. The
+        # full-task policy shut its gripper at once and a closed hand beside the
+        # handle (which cannot grasp it) was paid like an open one.
+        ready = torch.maximum(self._open(s1), grasped)
         distance = (self.physical_grasp(s1, c) - handle).norm(dim=-1)
         relative = _apply_inverse(peg_quat, nut - peg)
         # acos has an infinite derivative at 1 (a level nut); stay just inside.
@@ -212,7 +225,15 @@ class SquareMDP(RigidObjectMDP):
         )
         candidate = self._candidate(s1, c)
         values = {
-            "reaching": (1 - torch.tanh(distance / self.reaching_scale)) * approach,
+            # Imagination-only far term: the native 5 cm tanh is flat (derivative
+            # ~1e-9) at the ~0.5 m full-task start, so nothing pulled the hand in.
+            "reaching": (
+                2
+                - torch.tanh(distance / self.reaching_scale)
+                - torch.tanh(distance / self.far_reaching_scale)
+            )
+            * approach
+            * ready,
             # Imagination-only: holding stops paying once the nut is on the peg
             # (natively once seated). Pushing a threaded nut down by its handle
             # tilts and jams it; released, it slides down and seats.
@@ -255,7 +276,7 @@ class SquareMDP(RigidObjectMDP):
             "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, not both fingers inside grip_band (release proxy), grasp_seen and not invalid; no support-force, penetration or contact test",
             "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band (the legal grasp straight-through in the band); replaces force-bearing finger contact classification",
             "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
-            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the handle is grasped or the nut threaded; reaching also pays while grasped; handle_grasp and alignment gated off once threaded; imagination only",
+            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the handle is grasped or the nut threaded; reaching also pays while grasped, pays only an open hand (both fingers past grip_band) or a legal grasp, and adds a far term 1 - tanh(distance / far_reaching_scale); handle_grasp and alignment gated off once threaded; imagination only",
             "carry_weight": self.carry_weight,
             "imagined_early_release": "early_release_penalty for commanding open while the handle is grasped, the nut is not threaded and its centre is beyond release_radius of the peg axis; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
             "early_release_penalty": self.early_release_penalty,
@@ -266,6 +287,7 @@ class SquareMDP(RigidObjectMDP):
             "criteria": vars(self.criteria),
             "reward_scales": {
                 "reaching": self.reaching_scale,
+                "far_reaching": self.far_reaching_scale,
                 "alignment": self.alignment_scale,
                 "tilt": self.tilt_scale,
                 "insertion": self.insertion_scale,

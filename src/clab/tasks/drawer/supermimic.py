@@ -57,6 +57,7 @@ class DrawerMDP(RigidObjectMDP):
         panel_reach=(-0.005, 0.03),
         outside_release_penalty=2.0,
         inside_hold_cost=2.0,
+        far_reaching_scale=0.5,
         action_bound_weight=0.05,
         **kwargs,
     ):
@@ -69,6 +70,9 @@ class DrawerMDP(RigidObjectMDP):
                 raise ValueError(f"{name} must be finite and nonnegative")
         self.outside_release_penalty = float(outside_release_penalty)
         self.inside_hold_cost = float(inside_hold_cost)
+        self.far_reaching_scale = float(far_reaching_scale)
+        if not 0 < self.far_reaching_scale < float("inf"):
+            raise ValueError("far_reaching_scale must be finite and positive")
         self.grip_band = tuple(float(v) for v in grip_band)
         self.grasp_radius = float(grasp_radius)
         self.panel_reach = tuple(float(v) for v in panel_reach)
@@ -262,7 +266,18 @@ class DrawerMDP(RigidObjectMDP):
         )
         panel = self.target(c, "position") + quat_apply(housing_quat, panel_local)
         target = torch.where((stage < 2)[:, None], self.obj(s1, "position"), panel)
-        reaching = 1 - torch.tanh(10 * (grip - target).norm(dim=-1))
+        distance = (grip - target).norm(dim=-1)
+        reaching = 1 - torch.tanh(10 * distance)
+        # Imagination-only: before the pod is released, reaching pays only an open
+        # hand or a grasp, plus a far term (the native 10 cm tanh is flat at the
+        # ~0.5 m full-task start). The full-task policy shut its gripper at once and
+        # a closed hand beside the pod (which cannot grasp it) was paid like an open one.
+        grasped1, _ = self.contacts(s1, c)
+        fingers = self.state.get(s1, "robot_q")[:, 6:8]
+        opened = self._gate(fingers - self.grip_band[1], self.release_temperature).prod(-1)
+        ready = torch.maximum(opened, grasped1)
+        far = 1 - torch.tanh(distance / self.far_reaching_scale)
+        reaching = torch.where(stage < 2, (reaching + far) * ready, reaching)
         lift = ((height - self._field(s1, "initial_pod_z")) / 0.04).clamp(0, 1)
         place_target = torch.stack(
             (slide, torch.zeros_like(slide), torch.full_like(slide, 0.03)), -1
@@ -290,12 +305,17 @@ class DrawerMDP(RigidObjectMDP):
         # held pod outside the drawer costs outside_release_penalty and keeping
         # the gripper closed once the pod is inside costs inside_hold_cost per
         # second (natively nothing pays for letting go until the stage advances).
-        releasing = (self._field(s, "stage").round() == 1).to(s.dtype)
-        releasing = releasing * (1 - self._field(s, "failed"))
+        # The same opening cost applies in the lift stage: there a held pod
+        # dropped on the table fails natively, and the grasped-on-table starts
+        # learned to open at once.
+        alive = 1 - self._field(s, "failed")
+        stage0 = self._field(s, "stage").round()
+        releasing = (stage0 == 1).to(s.dtype) * alive
+        lifting = (stage0 == 0).to(s.dtype) * alive
         held, _ = self.contacts(s, c)
         local0, height0, slide0, _ = self._geometry(s, c)
         inside0 = pod_inside(local0, height0, slide0).to(s.dtype)
-        outside = releasing * held.detach() * (1 - inside0) * self._commands_open(a)
+        outside = (lifting + releasing * (1 - inside0)) * held.detach() * self._commands_open(a)
         reward = reward - self.outside_release_penalty * outside
         hold = releasing * inside0 * self._commands_closed(a)
         reward = reward - self.inside_hold_cost * hold * self.dt
@@ -308,7 +328,7 @@ class DrawerMDP(RigidObjectMDP):
             "imagined_success": "native PhysicalSequence update and final predicate on predicted states; pod grasp and drawer contact replaced by geometric proxies",
             "imagined_grasp": "physical grasp point within grasp_radius of the pod centre and both fingers within grip_band (straight-through in the band)",
             "imagined_failure": "done uses the native failure event (failed latch turning on) forward and the derivative of the active stage's failure condition backward, through straight-through grasp and inside gates",
-            "imagined_release": "in the release stage: outside_release_penalty for commanding open while the pod is held outside the drawer, inside_hold_cost per second for commanding closed while the pod is inside; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
+            "imagined_release": "in the lift and release stages: outside_release_penalty for commanding open while the pod is held (in the release stage, held outside the drawer), inside_hold_cost per second for commanding closed while the pod is inside; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
             "outside_release_penalty": self.outside_release_penalty,
             "inside_hold_cost": self.inside_hold_cost,
             "imagined_drawer_contact": "physical grasp point within panel_reach of the front panel outer face, inside its width and height",
@@ -318,6 +338,8 @@ class DrawerMDP(RigidObjectMDP):
             "process_fields": "stage, prefix, accomplished, references, counters and flags captured from the native sequence, then advanced analytically",
             "imagined_progress_shaping": "completed stages plus the native stage progress, so progress never drops when a stage completes; imagination only",
             "imagined_closing_reach": "closing-stage reaching target 2 cm in front of the panel's outer face (natively on the face); imagination only",
+            "imagined_ready_reach": "before the closing stage, reaching adds 1 - tanh(distance / far_reaching_scale) and pays only an open hand (both fingers past grip_band) or a pod grasp; imagination only",
+            "far_reaching_scale": self.far_reaching_scale,
         }
 
 

@@ -9,10 +9,16 @@ RESET_TYPES = (
     "PodHeldAboveOpenDrawer",
     "PodReleasedInOpenDrawer",
     "DrawerHalfClosed",
+    # Open hand just above the resting pod, derived physically from the paired
+    # DrawerOpenedPodGraspedOnTable row (clab.tasks.pregrasp): the rung between a
+    # free gripper and a held pod. Last, so the collected categories keep their indices.
+    "DrawerOpenedPodPregrasp",
 )
+# Categories the collector snapshots along each trajectory; the last one is derived.
+COLLECTED_TYPES = RESET_TYPES[:-1]
 # Stable grasp/lift and inside release. These are inherited witnesses,
 # never policy accomplishments in the new episode.
-PREFIX_FLAGS = ((0, 0), (0, 0), (1, 0), (1, 0), (1, 1), (1, 1))
+PREFIX_FLAGS = ((0, 0), (0, 0), (1, 0), (1, 0), (1, 1), (1, 1), (0, 0))
 # The half-closed snapshot is taken when the pushed slide first reaches this.
 HALF_CLOSED_SLIDE = 0.07
 # Preserve the finite 1200-step/20 Hz budget after removing opening. This is

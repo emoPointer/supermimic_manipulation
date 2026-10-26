@@ -35,13 +35,14 @@ from clab.robots.parallel_kinematics import DEFAULT_PROPOSAL_WORKERS
 from clab.scenes.workspace import workspace_metadata
 from clab.tasks.rigid_resets import reloaded_hold_mask
 
+from ..pregrasp import append_pregrasp
 from .config import make_env_cfg
 from .mdp import contact_found, handle_grasp_status, insertion_diagnostic
 from .proposals import ProposalConfig, Sampler
 from .props import NUT_HALF_HEIGHT, PEG_HALF_HEIGHT, within_workspace
 from .reset_data import FIELDS, SCHEMA, SPEC, bank_contract, validate_bank
 from .resets import snapshot, write_states
-from .settings import DESCENT_STEPS, RESET_TYPES, AssemblyCriteria
+from .settings import COLLECTED_TYPES, DESCENT_STEPS, RESET_TYPES, AssemblyCriteria
 from .variants import DEFAULT_ROBOT
 
 TABLETOP_REPLAY_PASSES = 4
@@ -345,7 +346,7 @@ def collect(
     criteria = AcceptanceConfig()
     descent = DescentConfig()
     lift = LiftConfig()
-    replay_counts = {kind: {"tested": 0, "passed": 0} for kind in RESET_TYPES}
+    replay_counts = {kind: {"tested": 0, "passed": 0} for kind in COLLECTED_TYPES}
     lift_counts = {"tested": 0, "passed": 0}
     context_counts = [
         dict(replay_tested=0, replay_passed=0, lift_passed=0) for _ in range(TABLETOP_REPLAY_PASSES)
@@ -405,8 +406,8 @@ def collect(
             for kind in RESET_TYPES[:3]
         ):
             raise ValueError("Source bank timing or complete geometry workspace mismatch")
-    collected = {kind: {field: [] for field in FIELDS} for kind in RESET_TYPES}
-    counts, attempts = dict.fromkeys(RESET_TYPES, 0), dict.fromkeys(RESET_TYPES, 0)
+    collected = {kind: {field: [] for field in FIELDS} for kind in COLLECTED_TYPES}
+    counts, attempts = dict.fromkeys(COLLECTED_TYPES, 0), dict.fromkeys(COLLECTED_TYPES, 0)
     if source is not None:
         for kind in RESET_TYPES[:3]:
             collected[kind] = {field: [source_states[kind][field][:per_type]] for field in FIELDS}
@@ -445,7 +446,7 @@ def collect(
             if bool((env.sim.data.overflow != 0).any()):
                 raise RuntimeError("MuJoCo-Warp contact/constraint capacity overflow")
 
-        jobs = [(i, kind, "threaded", per_type) for i, kind in enumerate(RESET_TYPES)]
+        jobs = [(i, kind, "threaded", per_type) for i, kind in enumerate(COLLECTED_TYPES)]
         if insertion_per_stage is not None:
             jobs[-1:] = [
                 (3, RESET_TYPES[3], stage, insertion_per_stage) for stage in INSERTION_STAGES
@@ -764,6 +765,9 @@ def collect(
     )
     bank["provenance"]["finger_position_projection"]["projected_contact_hold_revalidated"] = (
         source is None
+    )
+    bank = append_pregrasp(
+        bank, "square", seed=seed, device=device, cuda_graph_mode=cuda_graph_mode
     )
     validate_bank(bank, sampler.model)
     output.parent.mkdir(parents=True, exist_ok=True)

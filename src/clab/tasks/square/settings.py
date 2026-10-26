@@ -8,7 +8,13 @@ RESET_TYPES = (
     "NutRestingHandleGrasped",
     "NutAirborneHandleGrasped",
     "NutPartiallyInsertedHandleGrasped",
+    # Open hand just above the handle of a resting nut, derived physically from
+    # NutRestingHandleGrasped rows (clab.tasks.pregrasp): the rung between a free
+    # gripper and a held handle. Last, so the collected categories keep their indices.
+    "NutRestingEEPregrasp",
 )
+# Categories the collector simulates directly; the last one is derived from them.
+COLLECTED_TYPES = RESET_TYPES[:-1]
 # Grasped categories start from a collector-verified legal handle grasp
 # (unbroken legal contact); success counts it as observed in the episode.
 INHERITED_HANDLE_GRASP = tuple(kind.endswith("HandleGrasped") for kind in RESET_TYPES)

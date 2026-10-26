@@ -32,12 +32,14 @@ from clab.observations.state import pose
 from clab.robots.kinematics import SiteIK
 from clab.robots.parallel_kinematics import DEFAULT_PROPOSAL_WORKERS, CpuProposalPool
 
+from ..pregrasp import append_pregrasp
 from . import mdp
 from .config import make_env_cfg
 from .props import DRAWER_BOXES, POD_INITIAL_Z, POD_TOP_OFFSET
 from .reset_data import FIELDS, SCHEMA, WIDTHS, bank_contract, validate_bank
 from .resets import write_states
 from .settings import (
+    COLLECTED_TYPES,
     EPISODE_SECONDS,
     HALF_CLOSED_SLIDE,
     INITIAL_SLIDE_RANGE,
@@ -663,7 +665,7 @@ def collect(
         else None
     )
     rng = np.random.default_rng(seed)
-    collected = {kind: {key: [] for key in FIELDS} for kind in RESET_TYPES}
+    collected = {kind: {key: [] for key in FIELDS} for kind in COLLECTED_TYPES}
     successes, rejections, batches = [], Counter(), []
     env = ManagerBasedRlEnv(cfg=cfg, device=device)
     try:
@@ -806,6 +808,9 @@ def collect(
             bank,
             torch.tensor(np.stack(limits), dtype=torch.float32),
             DEFAULT_ROBOT.reset_finger_upper_tolerance,
+        )
+        bank = append_pregrasp(
+            bank, "drawer", seed=seed, device=device, cuda_graph_mode=cuda_graph_mode
         )
         validate_bank(bank, model)
         with output.open("xb") as stream:
