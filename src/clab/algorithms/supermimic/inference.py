@@ -1,7 +1,9 @@
 """Strict actor-only loading for task-contracted state-based SuperMimic policies.
 
 Loading is read-only: no world model, optimizer, capture hook or simulator step is
-created. Evaluation keeps native task resets, actions and success accounting.
+created. Evaluation keeps native task resets, actions and success accounting. Only
+the actor's interface must match the current task model; imagination-only settings
+(surrogate reward and success, world-model state) may differ, unlike resume.
 """
 
 from copy import deepcopy
@@ -13,6 +15,17 @@ from clab.contracts import checkpoint_environment, validate_environment_contract
 
 from .config import SuperMimicConfig
 from .networks import ACTOR_INPUT_NORMALIZATION, Policy
+
+# Task-model contract entries that define the actor's interface.
+ACTOR_CONTRACT_KEYS = (
+    "task",
+    "obs_dim",
+    "action_dim",
+    "actor_history",
+    "coordinates",
+    "binding",
+    "world_model_action",
+)
 
 
 class SuperMimicPolicy:
@@ -78,8 +91,11 @@ def load_policy(
         raise ValueError("Checkpoint/current SuperMimic task mismatch")
     if state.get("actor_input_normalization") != ACTOR_INPUT_NORMALIZATION:
         raise ValueError("This actor requires matching PPO observation normalization")
-    if state.get("mdp_contract") != mdp_contract:
-        raise ValueError("Checkpoint/current SuperMimic task-model contract mismatch")
+    saved_contract = state.get("mdp_contract")
+    if not isinstance(saved_contract, dict) or any(
+        saved_contract.get(key) != mdp_contract.get(key) for key in ACTOR_CONTRACT_KEYS
+    ):
+        raise ValueError("Checkpoint/current SuperMimic actor interface mismatch")
     if not isinstance(state.get("config"), dict):
         raise ValueError("SuperMimic checkpoint requires its algorithm configuration")
     config = SuperMimicConfig(**state["config"])
