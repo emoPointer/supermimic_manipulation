@@ -136,17 +136,20 @@ target improved the smooth terms.
   closed while the nut is threaded costs `peg_hold_cost` (2 per second); and holding stops
   paying once the nut is threaded (natively once seated), since pushing a threaded nut down by
   its handle tilts and jams it, while released it slides down and seats.
-- Both set `action_bound_weight` (0.2 per second; 0 elsewhere): a squared
-  cost on the raw gripper command beyond ±`gripper_bound` (3) and on raw pose axes beyond the
-  controller's input limit. The binary gripper's sigmoid derivative vanishes far from zero and
-  the clip has none past the limit, so a saturated command (Square's reached +12, then −5)
-  could no longer change. Both also set `gripper_gradient_bound` (3; 0 elsewhere): the
-  sigmoid derivative is taken at the raw command clamped to that bound, so it never vanishes.
+- These release costs use the native binary decision forward and a hinge derivative
+  backward: constant until the raw command is past the decision boundary by `gripper_margin`
+  (1), zero beyond. A sigmoid derivative vanishes on a saturated command (Square's reached
+  +12, later −5, and froze there); one that never vanishes kept driving correct decisions on,
+  to −7 against the action bound below, whose cost then dominated the imagined return, and the
+  policy drifted to wherever its own command was cheapest, away from the peg.
+- Both set `action_bound_weight` (0.05 per second; 0 elsewhere): a squared cost on the raw
+  gripper command beyond ±`gripper_bound` (3) and on raw pose axes beyond the controller's
+  input limit, where the clip has no derivative.
 
 These settings are recorded in `params/mdp.json` and can be overridden with
 `--adapter-option NAME=VALUE` (`stable_linear_speed`, `stable_angular_speed`,
 `release_opening`, `release_weight`, `success_gradient_scale`, `action_bound_weight`,
-`gripper_bound`, `gripper_gradient_bound`; Lemon also `contact_margin`, MugHang and Square
+`gripper_bound`, `gripper_margin`; Lemon also `contact_margin`, MugHang and Square
 also `carry_weight`, Square also `early_release_penalty`, `release_radius` and `peg_hold_cost`,
 Drawer also `grasp_radius`, `outside_release_penalty` and `inside_hold_cost`). Real collection and evaluation always use the native reward
 and success.

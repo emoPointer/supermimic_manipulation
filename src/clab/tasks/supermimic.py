@@ -189,7 +189,7 @@ class RigidObjectMDP:
         held_width=None,
         action_bound_weight=0.0,
         gripper_bound=3.0,
-        gripper_gradient_bound=0.0,
+        gripper_margin=1.0,
     ):
         release_opening = self.release_opening if release_opening is None else release_opening
         held_width = self.held_width if held_width is None else held_width
@@ -215,11 +215,11 @@ class RigidObjectMDP:
             raise ValueError("action_bound_weight must be finite and nonnegative")
         if not math.isfinite(gripper_bound) or gripper_bound <= 0:
             raise ValueError("gripper_bound must be positive and finite")
-        if not math.isfinite(gripper_gradient_bound) or gripper_gradient_bound < 0:
-            raise ValueError("gripper_gradient_bound must be finite and nonnegative")
+        if not math.isfinite(gripper_margin) or gripper_margin <= 0:
+            raise ValueError("gripper_margin must be positive and finite")
         self.action_bound_weight = float(action_bound_weight)
         self.gripper_bound = float(gripper_bound)
-        self.gripper_gradient_bound = float(gripper_gradient_bound)
+        self.gripper_margin = float(gripper_margin)
         self.held_width = float(held_width)
         self.gripper_gradient_temperature = float(gripper_gradient_temperature)
         self.release_opening = float(release_opening)
@@ -315,9 +315,9 @@ class RigidObjectMDP:
         )
         raw_gripper = action[:, 6:7]
         hard = torch.where(raw_gripper < 0, self.closed_position, self.open_position)
-        soft = self.closed_position + (
-            self.open_position - self.closed_position
-        ) * self._gripper_sigmoid(raw_gripper)
+        soft = self.closed_position + (self.open_position - self.closed_position) * torch.sigmoid(
+            raw_gripper / self.gripper_gradient_temperature
+        )
         gripper = hard + (soft - soft.detach())
         return torch.cat((pose, gripper), -1)
 
@@ -341,23 +341,24 @@ class RigidObjectMDP:
         soft = torch.sigmoid(margin / (self.smooth_temperature if scale is None else scale))
         return hard + (soft - soft.detach())
 
-    def _gripper_sigmoid(self, raw):
-        """Sigmoid behind the binary gripper's straight-through derivative.
+    def _commands_open(self, a):
+        """Native gripper decision (raw >= 0 opens) of ``a``, for a cost on opening.
 
-        With ``gripper_gradient_bound`` > 0 the derivative is taken at the raw command
-        clamped to that bound, so a saturated decision keeps a usable gradient
-        instead of the sigmoid tail's vanishing one.
+        Forward: the binary decision. Backward: a hinge, constant while the raw
+        command is above -gripper_margin and zero once it is closed by that margin.
+        The cost corrects a wrong or marginal decision however saturated, and stops
+        pushing a correct one: a sigmoid derivative vanishes on a saturated command,
+        and one that never vanishes drives a correct command on without end.
         """
-        bound = self.gripper_gradient_bound
-        if bound > 0:
-            raw = raw.detach().clamp(-bound, bound) + (raw - raw.detach())
-        return torch.sigmoid(raw / self.gripper_gradient_temperature)
-
-    def _open_command(self, a):
-        """Straight-through native gripper decision (raw >= 0 opens) of action ``a``."""
         raw = a[:, self.gripper_action_index]
-        soft = self._gripper_sigmoid(raw)
+        soft = (raw + self.gripper_margin).clamp_min(0) / (2 * self.gripper_margin)
         return (raw >= 0).to(raw.dtype) + (soft - soft.detach())
+
+    def _commands_closed(self, a):
+        """Native gripper decision (raw < 0 closes) of ``a``, for a cost on closing."""
+        raw = a[:, self.gripper_action_index]
+        soft = (self.gripper_margin - raw).clamp_min(0) / (2 * self.gripper_margin)
+        return (raw < 0).to(raw.dtype) + (soft - soft.detach())
 
     def _band(self, value, low, high, scale):
         """Straight-through ``low <= value <= high`` with sigmoid edges of width ``scale``."""
@@ -551,8 +552,8 @@ class RigidObjectMDP:
             "action_bound": "imagination-only cost action_bound_weight x squared excess of the raw gripper past gripper_bound and of raw pose axes past input_limit, per second",
             "action_bound_weight": self.action_bound_weight,
             "gripper_bound": self.gripper_bound,
-            "gripper_gradient_bound": self.gripper_gradient_bound,
-            "gripper_gradient_bound_meaning": "the binary gripper's sigmoid straight-through derivative is taken at the raw command clamped to +/-gripper_gradient_bound (0: unclamped)",
+            "gripper_margin": self.gripper_margin,
+            "gripper_decision_costs": "native binary decision forward; hinge derivative backward, constant until the raw command is past the decision boundary by gripper_margin, zero beyond",
             "success_counter_initialization": "native counter at replay start; subsequent imagined increments use the surrogate",
             "reward_weights": self.weights,
             "reward_dt": self.dt,

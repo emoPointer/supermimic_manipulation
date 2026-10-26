@@ -55,15 +55,10 @@ class SquareMDP(RigidObjectMDP):
         early_release_penalty=2.0,
         release_radius=0.01,
         peg_hold_cost=2.0,
-        action_bound_weight=0.2,
-        gripper_gradient_bound=3.0,
+        action_bound_weight=0.05,
         **kwargs,
     ):
-        super().__init__(
-            action_bound_weight=action_bound_weight,
-            gripper_gradient_bound=gripper_gradient_bound,
-            **kwargs,
-        )
+        super().__init__(action_bound_weight=action_bound_weight, **kwargs)
         for name, value in (
             ("carry_weight", carry_weight),
             ("early_release_penalty", early_release_penalty),
@@ -249,10 +244,9 @@ class SquareMDP(RigidObjectMDP):
         ).to(s.dtype)
         axis = _apply_inverse(peg_quat, nut0 - peg)[:, :2].norm(dim=-1)
         over_peg = (axis < self.release_radius).to(s.dtype)
-        opening = self._open_command(a)
-        early = held.detach() * (1 - on_peg) * (1 - over_peg) * opening
+        early = held.detach() * (1 - on_peg) * (1 - over_peg) * self._commands_open(a)
         reward = reward - self.early_release_penalty * early
-        reward = reward - self.peg_hold_cost * on_peg * (1 - opening) * self.dt
+        reward = reward - self.peg_hold_cost * on_peg * self._commands_closed(a) * self.dt
         done = 1 - (1 - values["success"]) * (1 - invalid) * (1 - self._timeout(s1))
         return reward, done
 
@@ -263,10 +257,10 @@ class SquareMDP(RigidObjectMDP):
             "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
             "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the handle is grasped or the nut threaded; reaching also pays while grasped; handle_grasp and alignment gated off once threaded; imagination only",
             "carry_weight": self.carry_weight,
-            "imagined_early_release": "early_release_penalty for commanding open while the handle is grasped, the nut is not threaded and its centre is beyond release_radius of the peg axis; straight-through on the raw gripper command; imagination only",
+            "imagined_early_release": "early_release_penalty for commanding open while the handle is grasped, the nut is not threaded and its centre is beyond release_radius of the peg axis; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
             "early_release_penalty": self.early_release_penalty,
             "release_radius": self.release_radius,
-            "imagined_peg_release": "peg_hold_cost per second for commanding closed while the nut is threaded; straight-through on the raw gripper command; imagination only",
+            "imagined_peg_release": "peg_hold_cost per second for commanding closed while the nut is threaded; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
             "peg_hold_cost": self.peg_hold_cost,
             "grip_band": list(self.grip_band),
             "criteria": vars(self.criteria),

@@ -57,15 +57,10 @@ class DrawerMDP(RigidObjectMDP):
         panel_reach=(-0.005, 0.03),
         outside_release_penalty=2.0,
         inside_hold_cost=2.0,
-        action_bound_weight=0.2,
-        gripper_gradient_bound=3.0,
+        action_bound_weight=0.05,
         **kwargs,
     ):
-        super().__init__(
-            action_bound_weight=action_bound_weight,
-            gripper_gradient_bound=gripper_gradient_bound,
-            **kwargs,
-        )
+        super().__init__(action_bound_weight=action_bound_weight, **kwargs)
         for name, value in (
             ("outside_release_penalty", outside_release_penalty),
             ("inside_hold_cost", inside_hold_cost),
@@ -300,10 +295,10 @@ class DrawerMDP(RigidObjectMDP):
         held, _ = self.contacts(s, c)
         local0, height0, slide0, _ = self._geometry(s, c)
         inside0 = pod_inside(local0, height0, slide0).to(s.dtype)
-        opening = self._open_command(a)
-        outside = releasing * held.detach() * (1 - inside0) * opening
+        outside = releasing * held.detach() * (1 - inside0) * self._commands_open(a)
         reward = reward - self.outside_release_penalty * outside
-        reward = reward - self.inside_hold_cost * releasing * inside0 * (1 - opening) * self.dt
+        hold = releasing * inside0 * self._commands_closed(a)
+        reward = reward - self.inside_hold_cost * hold * self.dt
         failed = self._failure(s, s1, c)
         done = 1 - (1 - values["success"]) * (1 - failed) * (1 - self._timeout(s1))
         return reward, done
@@ -313,7 +308,7 @@ class DrawerMDP(RigidObjectMDP):
             "imagined_success": "native PhysicalSequence update and final predicate on predicted states; pod grasp and drawer contact replaced by geometric proxies",
             "imagined_grasp": "physical grasp point within grasp_radius of the pod centre and both fingers within grip_band (straight-through in the band)",
             "imagined_failure": "done uses the native failure event (failed latch turning on) forward and the derivative of the active stage's failure condition backward, through straight-through grasp and inside gates",
-            "imagined_release": "in the release stage: outside_release_penalty for commanding open while the pod is held outside the drawer, inside_hold_cost per second for commanding closed while the pod is inside; straight-through on the raw gripper command; imagination only",
+            "imagined_release": "in the release stage: outside_release_penalty for commanding open while the pod is held outside the drawer, inside_hold_cost per second for commanding closed while the pod is inside; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
             "outside_release_penalty": self.outside_release_penalty,
             "inside_hold_cost": self.inside_hold_cost,
             "imagined_drawer_contact": "physical grasp point within panel_reach of the front panel outer face, inside its width and height",
