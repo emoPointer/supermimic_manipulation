@@ -205,8 +205,12 @@ class DrawerMDP(RigidObjectMDP):
         stage = self._field(s1, "stage")
         local, height, slide, housing_quat = self._geometry(s1, c)
         grip = self.physical_grasp(s1, c)
+        # Imagination-only: the native closing target sits on the panel's outer
+        # face, where a hand left inside the drawer scored almost as well as one
+        # pushing from the front, then jammed against the housing at ~0.08 m.
+        # Aim 2 cm in front of the face so pushing from outside pays more.
         panel_local = torch.stack(
-            (slide + 0.099, torch.zeros_like(slide), torch.full_like(slide, 0.04)), -1
+            (slide + _PANEL_X + 0.02, torch.zeros_like(slide), torch.full_like(slide, 0.04)), -1
         )
         panel = self.target(c, "position") + quat_apply(housing_quat, panel_local)
         target = torch.where((stage < 2)[:, None], self.obj(s1, "position"), panel)
@@ -244,6 +248,7 @@ class DrawerMDP(RigidObjectMDP):
             "panel_reach": list(self.panel_reach),
             "process_fields": "stage, prefix, accomplished, references, counters and flags captured from the native sequence, then advanced analytically",
             "imagined_progress_shaping": "completed stages plus the native stage progress, so progress never drops when a stage completes; imagination only",
+            "imagined_closing_reach": "closing-stage reaching target 2 cm in front of the panel's outer face (natively on the face); imagination only",
         }
 
 

@@ -108,7 +108,9 @@ alignment and insertion terms are 3 cm Gaussians, so its imagination likewise pu
 the nearer of an above-peg pose and the seated pose while the handle is grasped or the nut
 threaded. Drawer's
 native progress restarts at every stage (lift, place, close), so completing a stage would lower
-the reward; its imagined progress adds the number of completed stages instead.
+the reward; its imagined progress adds the number of completed stages instead, and its
+closing-stage reaching target sits 2 cm in front of the panel (natively on it), since a hand left
+inside the drawer pushed it only part-way before jamming against the housing.
 
 These settings are recorded in `params/mdp.json` and can be overridden with
 `--adapter-option NAME=VALUE` (`stable_linear_speed`, `stable_angular_speed`,
