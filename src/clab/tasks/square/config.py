@@ -170,10 +170,18 @@ def make_env_cfg(*, play: bool = False, reset_bank: str | Path | None = None):
         ),
         observations={
             "actor": ObservationGroupCfg(
-                terms=actor, history_length=5, enable_corruption=False, nan_policy="error"
+                terms=actor,
+                history_length=5,
+                enable_corruption=False,
+                nan_policy="error",
+                nan_check_per_term=False,
             ),
             "critic": ObservationGroupCfg(
-                terms=critic, history_length=1, enable_corruption=False, nan_policy="error"
+                terms=critic,
+                history_length=1,
+                enable_corruption=False,
+                nan_policy="error",
+                nan_check_per_term=False,
             ),
         },
         actions={DEFAULT_ROBOT.action_name: action},

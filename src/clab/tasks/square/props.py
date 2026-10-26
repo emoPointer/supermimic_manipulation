@@ -11,6 +11,8 @@ import mujoco
 import numpy as np
 from mjlab.entity import EntityCfg
 
+from clab.tensors import constant
+
 NUT_BOXES = (
     ((-0.03325, 0.0, 0.0), (0.0105, 0.04375, 0.01)),
     ((0.0, 0.03325, 0.0), (0.03125, 0.0105, 0.01)),
@@ -62,7 +64,7 @@ def within_workspace(poses, corners):
         points = (
             quat_apply(
                 pose[:, None, 3:].expand(-1, len(vertices), -1),
-                pose.new_tensor(vertices)[None].expand(len(pose), -1, -1),
+                constant(pose, vertices)[None].expand(len(pose), -1, -1),
             )
             + pose[:, None, :3]
         )

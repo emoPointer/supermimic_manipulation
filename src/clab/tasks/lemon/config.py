@@ -160,10 +160,18 @@ def make_env_cfg(
         ),
         observations={
             "actor": ObservationGroupCfg(
-                terms=actor_terms, history_length=5, enable_corruption=False, nan_policy="error"
+                terms=actor_terms,
+                history_length=5,
+                enable_corruption=False,
+                nan_policy="error",
+                nan_check_per_term=False,
             ),
             "critic": ObservationGroupCfg(
-                terms=critic_terms, history_length=1, enable_corruption=False, nan_policy="error"
+                terms=critic_terms,
+                history_length=1,
+                enable_corruption=False,
+                nan_policy="error",
+                nan_check_per_term=False,
             ),
         },
         actions={DEFAULT_ROBOT.action_name: action},

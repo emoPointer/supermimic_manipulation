@@ -11,6 +11,7 @@ it has no speed threshold. Native real rewards and evaluation remain authoritati
 import torch
 
 from clab.tasks.supermimic import RigidObjectAdapter, RigidObjectMDP
+from clab.tensors import constant
 
 from .settings import SUCCESS_MAX_HEIGHT, SUCCESS_MIN_HEIGHT, SUCCESS_XY_TOLERANCE
 
@@ -55,7 +56,7 @@ class LemonMDP(RigidObjectMDP):
     def reward(self, s, a, s1, c):
         lemon = self.obj(s1, "position")
         reaching = 1 - torch.tanh((self.physical_grasp(s1, c) - lemon).norm(dim=-1))
-        goal = self.target(c, "position") + s.new_tensor((0.0, 0.0, self.goal_height))
+        goal = self.target(c, "position") + constant(s, (0.0, 0.0, self.goal_height))
         placement = torch.exp(-(lemon - goal).norm(dim=-1))
         # Imagination-only shaping, as in BoxInBin: once resting on the plate,
         # reaching stops paying and finger opening is rewarded instead.

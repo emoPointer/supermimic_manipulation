@@ -31,6 +31,7 @@ from clab.controllers.torch_kinematics import (
     serial_chain_fk,
     six_to_quat,
 )
+from clab.tensors import constant
 
 CAPTURE_NAME = "supermimic_transition_capture"
 # Controller-memory and bookkeeping fields advanced analytically, never predicted.
@@ -305,7 +306,7 @@ class RigidObjectMDP:
         pose = action[:, :6]
         if self.input_limit is not None:
             pose = pose.clamp(-self.input_limit, self.input_limit)
-        pose = pose * action.new_tensor([self.position_scale] * 3 + [self.orientation_scale] * 3)
+        pose = pose * constant(action, [self.position_scale] * 3 + [self.orientation_scale] * 3)
         pose = torch.cat(
             (
                 _limit_norm(pose[:, :3], self.linear_step_limit),
@@ -429,7 +430,7 @@ class RigidObjectMDP:
             self.state.get(s, "robot_q")[:, :6], self.physical_links
         )
         position = position + quat_apply(
-            quaternion, s.new_tensor(self.grasp_offset).expand_as(position)
+            quaternion, constant(s, self.grasp_offset).expand_as(position)
         )
         base_quat = six_to_quat(self.context.get(c, "base_rotation"))
         return self.context.get(c, "base_position") + quat_apply(base_quat, position)

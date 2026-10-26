@@ -16,6 +16,7 @@ import torch
 
 from clab.controllers.torch_kinematics import quat_apply, quat_inverse, six_to_quat
 from clab.tasks.supermimic import RigidObjectAdapter, RigidObjectMDP
+from clab.tensors import constant
 
 from .mdp import threaded_geometry
 from .props import NUT_BOXES, NUT_GRASP_POINT, NUT_HALF_HEIGHT, NUT_SEATED_OFFSET, PEG_HALF_HEIGHT
@@ -143,7 +144,7 @@ class SquareMDP(RigidObjectMDP):
 
     def _tilt(self, s, c):
         _, nut_quat, _, peg_quat = self._frames(s, c)
-        normal = s.new_tensor((0.0, 0.0, 1.0)).expand(len(s), -1)
+        normal = constant(s, (0.0, 0.0, 1.0)).expand(len(s), -1)
         return _apply_inverse(peg_quat, quat_apply(nut_quat, normal))[:, 2].abs().clamp(0, 1)
 
     def _seated(self, s, c):
@@ -187,7 +188,7 @@ class SquareMDP(RigidObjectMDP):
         invalid, grasp_seen = self._flag(s1, "invalid"), self._flag(s1, "grasp_seen")
         valid = 1 - invalid
         seated = self._seated(s1, c).detach()
-        handle = nut + quat_apply(nut_quat, nut.new_tensor(NUT_GRASP_POINT).expand_as(nut))
+        handle = nut + quat_apply(nut_quat, constant(nut, NUT_GRASP_POINT).expand_as(nut))
         # Imagination-only: the native reaching term stops while the handle is
         # grasped, so an open gripper hovering at the handle (0.2) paid more than
         # holding it (handle_grasp 0.1) and the policy released at once. Keep
@@ -206,7 +207,7 @@ class SquareMDP(RigidObjectMDP):
             - (tilt / self.tilt_scale).square()
         )
         seated_target = peg + quat_apply(
-            peg_quat, peg.new_tensor((0.0, 0.0, NUT_SEATED_OFFSET)).expand_as(peg)
+            peg_quat, constant(peg, (0.0, 0.0, NUT_SEATED_OFFSET)).expand_as(peg)
         )
         threaded = threaded_geometry(
             nut, nut_quat, peg, peg_quat, axial_tolerance=self.criteria.max_penetration
@@ -218,7 +219,7 @@ class SquareMDP(RigidObjectMDP):
         # the peg never lowers it) while it is held by the handle or threaded,
         # not when shoved across the table.
         above_target = peg + quat_apply(
-            peg_quat, peg.new_tensor((0.0, 0.0, _ABOVE_PEG)).expand_as(peg)
+            peg_quat, constant(peg, (0.0, 0.0, _ABOVE_PEG)).expand_as(peg)
         )
         carry = torch.exp(
             -torch.minimum((nut - above_target).norm(dim=-1), (nut - seated_target).norm(dim=-1))

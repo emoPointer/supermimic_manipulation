@@ -12,6 +12,7 @@ from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
 
 from clab.observations.state import pose
 from clab.tasks import rewards
+from clab.tensors import constant
 
 from .props import (
     HOLE_HALF_WIDTH,
@@ -39,8 +40,8 @@ def threaded_geometry(nut_pos, nut_quat, peg_pos, peg_quat, *, axial_tolerance=0
     tolerance permits the small base-contact compression already allowed by the
     penetration gate; it never enlarges the square opening. Not a stability test.
     """
-    corners = nut_pos.new_tensor([(-1, -1, -1), (-1, 1, -1), (1, -1, -1), (1, 1, -1)])
-    lower = corners * nut_pos.new_tensor((PEG_HALF_WIDTH, PEG_HALF_WIDTH, PEG_HALF_HEIGHT))
+    corners = constant(nut_pos, [(-1, -1, -1), (-1, 1, -1), (1, -1, -1), (1, 1, -1)])
+    lower = corners * constant(nut_pos, (PEG_HALF_WIDTH, PEG_HALF_WIDTH, PEG_HALF_HEIGHT))
     upper = lower.clone()
     upper[:, 2] = PEG_HALF_HEIGHT
     n = len(nut_pos)
@@ -82,7 +83,7 @@ def classify_finger_contacts(data, nut_pos, nut_quat, criteria):
     lower, upper = handle_contact_bounds(criteria.handle_clearance, criteria.contact_tolerance)
     rotation = nut_quat[:, None].expand(-1, data.pos.shape[1], -1)
     local = quat_apply_inverse(rotation, data.pos - nut_pos[:, None])
-    inside = ((local >= local.new_tensor(lower)) & (local <= local.new_tensor(upper))).all(-1)
+    inside = ((local >= constant(local, lower)) & (local <= constant(local, upper))).all(-1)
     active = (data.found > 0) & (data.force.norm(dim=-1) >= criteria.finger_force_min)
     touching = active.any(-1)
     legal = (active & inside).any(-1) & ~(active & ~inside).any(-1)
@@ -107,7 +108,7 @@ def seating_geometry(nut_pos, nut_quat, peg_pos, peg_quat, criteria):
     no arbitrary yaw or upright-face restriction is introduced.
     """
     relative = quat_apply_inverse(peg_quat, nut_pos - peg_pos)
-    normal = nut_pos.new_tensor((0.0, 0.0, 1.0)).expand_as(nut_pos)
+    normal = constant(nut_pos, (0.0, 0.0, 1.0)).expand_as(nut_pos)
     nut_normal = quat_apply_inverse(peg_quat, quat_apply(nut_quat, normal))
     level = nut_normal[:, 2].abs() >= math.cos(math.radians(criteria.max_tilt_degrees))
     height = (relative[:, 2] - NUT_SEATED_OFFSET).abs() <= criteria.seated_height_tolerance
@@ -171,7 +172,7 @@ class StableSuccess(ManagerTermBase):
         nut_pos, nut_quat = pose(env, "nut")
         peg_pos, peg_quat = pose(env, "peg")
         base = env.scene["nut_base_support"].data
-        peg_normal = quat_apply(peg_quat, peg_pos.new_tensor((0.0, 0.0, 1.0)).expand_as(peg_pos))
+        peg_normal = quat_apply(peg_quat, constant(peg_pos, (0.0, 0.0, 1.0)).expand_as(peg_pos))
         support = (base.force * peg_normal[:, None]).sum(-1).abs().sum(-1)
         supported = (base.found > 0).any(-1) & (support >= self.criteria.support_force_min)
         safe = torch.ones_like(self.grasp_seen)
@@ -204,9 +205,9 @@ def reaching_reward(env, distance_scale):
     ee_pos, ee_quat = pose(env, "robot", DEFAULT_ROBOT.ee_body)
     nut_pos, nut_quat = pose(env, "nut")
     grasp = ee_pos + quat_apply(
-        ee_quat, ee_pos.new_tensor(DEFAULT_ROBOT.grasp_offset).expand_as(ee_pos)
+        ee_quat, constant(ee_pos, DEFAULT_ROBOT.grasp_offset).expand_as(ee_pos)
     )
-    handle = nut_pos + quat_apply(nut_quat, nut_pos.new_tensor(NUT_GRASP_POINT).expand_as(nut_pos))
+    handle = nut_pos + quat_apply(nut_quat, constant(nut_pos, NUT_GRASP_POINT).expand_as(nut_pos))
     state = progress(env)
     approach = ~state.grasped & ~state.invalid & ~(state.seated & state.grasp_seen)
     return (1.0 - torch.tanh((grasp - handle).norm(dim=-1) / distance_scale)) * approach
@@ -220,7 +221,7 @@ def alignment_reward(env, distance_scale, tilt_scale):
     nut_pos, nut_quat = pose(env, "nut")
     peg_pos, peg_quat = pose(env, "peg")
     relative = quat_apply_inverse(peg_quat, nut_pos - peg_pos)
-    normal = nut_pos.new_tensor((0.0, 0.0, 1.0)).expand_as(nut_pos)
+    normal = constant(nut_pos, (0.0, 0.0, 1.0)).expand_as(nut_pos)
     cosine = quat_apply_inverse(peg_quat, quat_apply(nut_quat, normal))[:, 2].abs().clamp(0, 1)
     tilt = torch.acos(cosine)
     alignment = torch.exp(
@@ -232,7 +233,7 @@ def alignment_reward(env, distance_scale, tilt_scale):
 def insertion_reward(env, distance_scale):
     nut_pos, _ = pose(env, "nut")
     peg_pos, peg_quat = pose(env, "peg")
-    offset = peg_pos.new_tensor((0.0, 0.0, NUT_SEATED_OFFSET)).expand_as(peg_pos)
+    offset = constant(peg_pos, (0.0, 0.0, NUT_SEATED_OFFSET)).expand_as(peg_pos)
     target = peg_pos + quat_apply(peg_quat, offset)
     return (
         torch.exp(-((nut_pos - target).norm(dim=-1) / distance_scale).square())

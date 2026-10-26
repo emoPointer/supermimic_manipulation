@@ -43,8 +43,18 @@ def validate_environment_contract(saved: dict, cfg, *, for_resume: bool = False)
                 result[name] = params["task_contract"]
         return result
 
+    def observations(record):
+        # Checking each term or the concatenated group detects the same NaN/Inf
+        # values; only the error message's context differs.
+        return {
+            name: {key: value for key, value in group.items() if key != "nan_check_per_term"}
+            if isinstance(group, dict)
+            else group
+            for name, group in record["observations"].items()
+        }
+
     def contract(record):
-        fields = ("observations", "decimation", "episode_length_s", "is_finite_horizon")
+        fields = ("decimation", "episode_length_s", "is_finite_horizon")
         if not for_resume:
             fields += ("rewards", "terminations")
         result = {
@@ -52,6 +62,7 @@ def validate_environment_contract(saved: dict, cfg, *, for_resume: bool = False)
                 name: action_contract(action) for name, action in record["actions"].items()
             },
             "task-owned scientific contracts": task_contracts(record),
+            "observations": observations(record),
             **{field: record[field] for field in fields},
             "sim": record["sim"]["mujoco"] if for_resume else record["sim"],
             "scene entities": record["scene"]["entities"],
