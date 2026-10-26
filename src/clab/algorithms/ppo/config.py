@@ -16,6 +16,13 @@ class ClabPpoRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     upload_model: bool = False
 
+    # "native": the task's reward manager. "imagined": the task's SuperMimic MDP
+    # reward on each real transition, the function SuperMimic optimizes in
+    # imagination (with its imagination-only shaping), for a like-for-like baseline.
+    reward_source: Literal["native", "imagined"] = "native"
+
+    task_name: str = ""
+
     logger: dict[str, str] = field(
         default_factory=lambda: {
             "class_name": "clab.logging.wandb_writer:ClabWandbLogWriter",

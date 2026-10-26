@@ -31,6 +31,13 @@ def ppo(argv: list[str], prog: str) -> None:
     parser.add_argument("--cuda-graph-mode", choices=("auto", "plain"), default="auto")
     parser.add_argument("--wandb-entity", help="Also log metrics to this Weights & Biases entity")
     parser.add_argument("--gpu-ids", type=int, nargs="+", default=[0])
+    parser.add_argument(
+        "--reward",
+        choices=("native", "imagined"),
+        default="native",
+        help="native: the task reward; imagined: SuperMimic's task MDP reward evaluated on "
+        "each real transition (the function SuperMimic optimizes)",
+    )
     args = parser.parse_args(argv)
     from clab.algorithms.ppo.train import train
 
@@ -49,6 +56,7 @@ def ppo(argv: list[str], prog: str) -> None:
         cuda_graph_mode=args.cuda_graph_mode,
         wandb_entity=args.wandb_entity,
         gpu_ids=tuple(args.gpu_ids),
+        reward_source=args.reward,
     )
 
 
