@@ -4,9 +4,11 @@ A scripted source validates at known expert phase boundaries. RL has no such pha
 oracle. This implementation advances through the same ordered physical milestones
 using observed geometry/contact rather than planner labels. That is an explicit
 task adaptation, not a literal replay of the expert's timing. The drawer starts
-open: insertion/opening is neither a milestone nor an inherited prefix. Lost
-transport grasp or pod escape during closing ends the sequence. Late reset
-prefixes are kept separate from this episode's accomplishments and observed.
+open: insertion/opening is neither a milestone nor an inherited prefix. Nothing
+ends the task's sequence early: a grasp lost before the lift starts the grasp
+again, a pod released anywhere may still come to rest in the drawer, and a pod
+grasped again or out of the drawer while closing returns to the release stage.
+Late reset prefixes are kept separate from this episode's accomplishments.
 """
 
 import math
@@ -41,11 +43,15 @@ class PhysicalSequence:
     Stage 0 grasp/lift, 1 release, 2 push, 3 final hold.
     ``prefix`` only credits verified offline history. ``accomplished`` reports
     solely events witnessed since this reset. Counts use physical durations.
+    ``strict`` (reset collection, whose rows must come from one unbroken process)
+    instead latches ``failed`` on a grasp lost before the lift, a release outside the
+    drawer and a re-grasp or escape while closing, and stops the sequence there.
     """
 
-    observation_dim = 13
+    observation_dim = 12
 
-    def __init__(self, count, device, control_dt):
+    def __init__(self, count, device, control_dt, strict=False):
+        self.strict = strict
         self.stage = torch.zeros(count, dtype=torch.long, device=device)
         self.prefix = torch.zeros((count, 2), dtype=torch.bool, device=device)
         self.accomplished = torch.zeros((count, 3), dtype=torch.bool, device=device)
@@ -103,8 +109,13 @@ class PhysicalSequence:
             self.grasp_count + 1,
             torch.where(lifting, 0, self.grasp_count),
         )
-        self.failed |= lifting & self.grasp_confirmed & ~grasped
-        self.grasp_confirmed |= lifting & (self.grasp_count >= self.grasp_steps)
+        if self.strict:
+            self.failed |= lifting & self.grasp_confirmed & ~grasped
+        # Confirmation needs the current grasp unbroken for grasp_steps; a lost grasp
+        # starts it again.
+        self.grasp_confirmed = torch.where(
+            lifting, self.grasp_count >= self.grasp_steps, self.grasp_confirmed
+        )
         lifted = (
             lifting
             & ~self.failed
@@ -116,7 +127,8 @@ class PhysicalSequence:
         self.accomplished[lifted, 0] = True
 
         releasing = (prior == 1) & alive
-        self.failed |= releasing & ~grasped & ~inside
+        if self.strict:
+            self.failed |= releasing & ~grasped & ~inside
         self.release_count = torch.where(
             releasing & ~grasped & inside,
             self.release_count + 1,
@@ -128,11 +140,18 @@ class PhysicalSequence:
         self.accomplished[released, 1] = True
 
         closing = (prior == 2) & alive
-        self.failed |= closing & (grasped | ~inside)
+        escaped = closing & (grasped | ~inside)
+        if self.strict:
+            self.failed |= escaped
+        else:
+            # Grasped again or out of the drawer: it has to be released inside again.
+            self.stage[escaped] = 1
+            self.release_count[escaped] = 0
+            self.push_contact[escaped] = False
+        closing &= ~escaped
         self.push_contact |= closing & drawer_contact
         closed = (
             closing
-            & ~self.failed
             & self.push_contact
             & ((self.close_q - slide) >= MIN_CLOSE_DELTA)
             & (slide <= 0.03)
@@ -167,7 +186,6 @@ class PhysicalSequence:
                     self.close_q * push,
                     self.push_contact.float() * push,
                     self.final_count / self.success_steps * hold,
-                    self.failed.float(),
                     self.success.float(),
                 ),
                 -1,

@@ -1,9 +1,9 @@
 """Drawer SuperMimic surrogate: grasp/lift, release inside, push closed, hold.
 
 The world model predicts the arm, the pod and the passive slide. The native
-``PhysicalSequence`` milestones (stage, prefix, accomplishments, counters,
-failure) are carried as analytic state and advanced with the native update
-rules. Its two contact predicates are approximated geometrically: a two-finger
+``PhysicalSequence`` milestones (stage, prefix, accomplishments, counters) are
+carried as analytic state and advanced with the native update rules, which never
+fail. Its two contact predicates are approximated geometrically: a two-finger
 pod grasp is the physical grasp point near the pod centre with both fingers in
 the closed-on-pod band, and drawer contact is the grasp point at the outside of
 the front panel. Native real rewards and evaluation remain authoritative.
@@ -30,7 +30,6 @@ _PROCESS = (
     ("release_count", 1),
     ("grasp_confirmed", 1),
     ("push_contact", 1),
-    ("failed", 1),
 )
 
 
@@ -137,42 +136,8 @@ class DrawerMDP(RigidObjectMDP):
         soft = torch.sigmoid(margins / self.smooth_temperature).prod(-1)
         return hard + (soft - soft.detach())
 
-    def _inside(self, local, height, slide):
-        """Native pod_inside forward with sigmoid straight-through margins."""
-        hard = pod_inside(local, height, slide).to(local.dtype)
-        margins = torch.stack(
-            (0.08 - (local[:, 0] - slide).abs(), 0.08 - local[:, 1].abs(), 0.06 - height), -1
-        )
-        soft = torch.sigmoid(margins / self.smooth_temperature).prod(-1)
-        return hard + (soft - soft.detach())
-
-    def _failure(self, s, s1, c):
-        """This transition's native failure event with a straight-through hazard.
-
-        Forward: the analytic ``failed`` latch turning on (imagination never starts
-        from a failed state). Backward: the derivative of the active stage's native
-        failure condition through the straight-through grasp and inside gates. Used
-        as ``done``, it shows the actor that failing forfeits the rest of the imagined
-        return; the hard latch has no derivative, while a released pod falling toward
-        the place target does, so opening the gripper above the drawer looked good.
-        """
-        stage = self._field(s, "stage").round()
-        alive = 1 - self._field(s, "failed")
-        local, height, slide, _ = self._geometry(s1, c)
-        grasped, _ = self.contacts(s1, c)
-        inside = self._inside(local, height, slide)
-        lost = 1 - grasped
-        hazard = alive * (
-            (stage == 0).to(s.dtype) * self._field(s, "grasp_confirmed") * lost
-            + (stage == 1).to(s.dtype) * lost * (1 - inside)
-            + (stage == 2).to(s.dtype) * (1 - lost * inside)
-        )
-        event = (self._field(s1, "failed") - self._field(s, "failed")).clamp(0, 1)
-        return event + (hazard - hazard.detach())
-
     def _candidate(self, s, c):
-        at_hold = (self._field(s, "stage") == 3).to(s.dtype) * (1 - self._field(s, "failed"))
-        return at_hold * self._final(s, c)
+        return (self._field(s, "stage") == 3).to(s.dtype) * self._final(s, c)
 
     def advance_task_fields(self, fields, s, c):
         """Native PhysicalSequence.update on the provisional (predicted) state."""
@@ -183,45 +148,37 @@ class DrawerMDP(RigidObjectMDP):
         inside = pod_inside(local, pod_z, slide)
         get = lambda name: self._field(s, name)  # noqa: E731
         stage = get("stage").round().long()
-        failed, confirmed = get("failed") > 0.5, get("grasp_confirmed") > 0.5
         push_contact = get("push_contact") > 0.5
         accomplished = self.state.get(s, "accomplished") > 0.5
         grasp_count, release_count = get("grasp_count"), get("release_count")
         close_q = get("close_q")
-        alive = ~failed
-        lifting = (stage == 0) & alive
+        lifting = stage == 0
         grasp_count = torch.where(
             lifting & grasped, grasp_count + 1, torch.where(lifting, 0, grasp_count)
         )
-        failed = failed | (lifting & confirmed & ~grasped)
-        confirmed = confirmed | (lifting & (grasp_count >= self.grasp_steps))
-        lifted = (
-            lifting
-            & ~failed
-            & confirmed
-            & grasped
-            & ((pod_z - get("initial_pod_z")) >= MIN_POD_LIFT)
+        confirmed = torch.where(
+            lifting, grasp_count >= self.grasp_steps, get("grasp_confirmed") > 0.5
         )
-        releasing = (stage == 1) & alive
-        failed = failed | (releasing & ~grasped & ~inside)
+        lifted = lifting & confirmed & grasped & ((pod_z - get("initial_pod_z")) >= MIN_POD_LIFT)
+        releasing = stage == 1
         release_count = torch.where(
             releasing & ~grasped & inside,
             release_count + 1,
             torch.where(releasing, 0, release_count),
         )
-        released = releasing & ~failed & (release_count >= self.release_steps)
-        closing = (stage == 2) & alive
-        failed = failed | (closing & (grasped | ~inside))
-        push_contact = push_contact | (closing & drawer)
+        released = releasing & (release_count >= self.release_steps)
+        closing = stage == 2
+        escaped = closing & (grasped | ~inside)
+        closing = closing & ~escaped
+        release_count = torch.where(escaped, 0, release_count)
+        push_contact = ~escaped & (push_contact | (closing & drawer))
         close_q = torch.where(released, slide, close_q)
-        closed = (
-            closing
-            & ~failed
-            & push_contact
-            & ((close_q - slide) >= MIN_CLOSE_DELTA)
-            & (slide <= 0.03)
+        closed = closing & push_contact & ((close_q - slide) >= MIN_CLOSE_DELTA) & (slide <= 0.03)
+        stage = torch.where(
+            lifted | escaped,
+            1,
+            torch.where(released, 2, torch.where(closed, 3, stage)),
         )
-        stage = torch.where(lifted, 1, torch.where(released, 2, torch.where(closed, 3, stage)))
         accomplished = accomplished | torch.stack((lifted, released, closed), -1)
         dtype = provisional.dtype
         fields.update(
@@ -232,7 +189,6 @@ class DrawerMDP(RigidObjectMDP):
             release_count=release_count[:, None],
             grasp_confirmed=confirmed.to(dtype)[:, None],
             push_contact=push_contact.to(dtype)[:, None],
-            failed=failed.to(dtype)[:, None],
         )
         super().advance_task_fields(fields, s, c)
 
@@ -253,7 +209,6 @@ class DrawerMDP(RigidObjectMDP):
                 g(s, "close_q") * push,
                 g(s, "push_contact") * push,
                 count[:, None] / self.required_steps * hold,
-                g(s, "failed"),
                 (count >= self.required_steps).to(s.dtype)[:, None],
             ),
             -1,
@@ -320,44 +275,42 @@ class DrawerMDP(RigidObjectMDP):
         }
         reward = sum(self.weights[name] * value for name, value in values.items()) * self.dt
         # Imagination-only release shaping on the raw gripper command, whose
-        # straight-through derivative acts directly; the failure hazard reaches the
-        # command only through the world model's finger prediction (trained at the
-        # two binary targets), which left the decision at the open/closed boundary
-        # and the pod dropped above the drawer. In the release stage, opening a
-        # held pod outside the drawer costs outside_release_penalty and keeping
-        # the gripper closed once the pod is inside costs inside_hold_cost per
-        # second (natively nothing pays for letting go until the stage advances).
-        # The same opening cost applies in the lift stage: there a held pod
-        # dropped on the table fails natively, and the grasped-on-table starts
-        # learned to open at once.
-        alive = 1 - self._field(s, "failed")
+        # straight-through derivative acts directly; through the world model's
+        # finger prediction (trained at the two binary targets) the derivative was
+        # too weak to change a decision. Opening a held pod costs
+        # outside_release_penalty in the lift stage (the grasped-on-table starts
+        # learned to open at once and dropped it) and, in the release stage,
+        # unless the pod is over the drawer opening: released there it drops into
+        # the drawer (every one of 256 from the PodHeldAboveOpenDrawer pose, 12 cm
+        # above the bottom), elsewhere onto the table. Keeping the gripper closed
+        # once the pod is inside costs inside_hold_cost per second (natively
+        # nothing pays for letting go until the stage advances).
         stage0 = self._field(s, "stage").round()
-        releasing = (stage0 == 1).to(s.dtype) * alive
-        lifting = (stage0 == 0).to(s.dtype) * alive
+        releasing = (stage0 == 1).to(s.dtype)
+        lifting = (stage0 == 0).to(s.dtype)
         held, _ = self.contacts(s, c)
         local0, height0, slide0, _ = self._geometry(s, c)
         inside0 = pod_inside(local0, height0, slide0).to(s.dtype)
-        outside = (lifting + releasing * (1 - inside0)) * held.detach() * self._commands_open(a)
+        over0 = (((local0[:, 0] - slide0).abs() < 0.08) & (local0[:, 1].abs() < 0.08)).to(s.dtype)
+        outside = (lifting + releasing * (1 - over0)) * held.detach() * self._commands_open(a)
         reward = reward - self.outside_release_penalty * outside
         hold = releasing * inside0 * self._commands_closed(a)
         reward = reward - self.inside_hold_cost * hold * self.dt
-        failed = self._failure(s, s1, c)
-        done = 1 - (1 - values["success"]) * (1 - failed) * (1 - self._timeout(s1))
+        done = 1 - (1 - values["success"]) * (1 - self._timeout(s1))
         return reward, done
 
     def task_contract(self):
         return {
-            "imagined_success": "native PhysicalSequence update and final predicate on predicted states; pod grasp and drawer contact replaced by geometric proxies",
+            "imagined_success": "native PhysicalSequence update (no failure: a lost grasp before the lift restarts the grasp, a pod grasped or out of the drawer while closing returns to the release stage) and final predicate on predicted states; pod grasp and drawer contact replaced by geometric proxies; done only on success or the time limit",
             "imagined_grasp": "physical grasp point within grasp_radius of the pod centre and both fingers within grip_band (straight-through in the band)",
-            "imagined_failure": "done uses the native failure event (failed latch turning on) forward and the derivative of the active stage's failure condition backward, through straight-through grasp and inside gates",
-            "imagined_release": "in the lift and release stages: outside_release_penalty for commanding open while the pod is held (in the release stage, held outside the drawer), inside_hold_cost per second for commanding closed while the pod is inside; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
+            "imagined_release": "outside_release_penalty for commanding open while the pod is held, in the lift stage and in the release stage unless the pod is over the drawer opening (the inside footprint at any height); inside_hold_cost per second for commanding closed while the pod is inside in the release stage; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
             "outside_release_penalty": self.outside_release_penalty,
             "inside_hold_cost": self.inside_hold_cost,
             "imagined_drawer_contact": "physical grasp point within panel_reach of the front panel outer face, inside its width and height",
             "grip_band": list(self.grip_band),
             "grasp_radius": self.grasp_radius,
             "panel_reach": list(self.panel_reach),
-            "process_fields": "stage, prefix, accomplished, references, counters and flags captured from the native sequence, then advanced analytically",
+            "process_fields": "stage, prefix, accomplished, references, counters and contact flags captured from the native sequence, then advanced analytically",
             "imagined_progress_shaping": "completed stages plus the native stage progress, so progress never drops when a stage completes; imagination only",
             "imagined_closing_reach": "closing-stage reaching target 2 cm in front of the panel's outer face (natively on the face); imagination only",
             "imagined_ready_reach": "before the closing stage, reaching averages the native term with 1 - tanh(distance / far_reaching_scale) and, until grasp_confirmed or the lift stage completes, pays only an open hand (both fingers past grip_band) or a pod grasp; in the closing and final stages reaching is 1 plus the native term (the completed reach counted, like progress); imagination only",
@@ -432,5 +385,4 @@ class DrawerAdapter(RigidObjectAdapter):
             "release_count": sequence.release_count.float()[:, None],
             "grasp_confirmed": sequence.grasp_confirmed.float()[:, None],
             "push_contact": sequence.push_contact.float()[:, None],
-            "failed": sequence.failed.float()[:, None],
         }

@@ -6,7 +6,7 @@ common controller settings alone do not establish experimental equivalence.
 OSC control uses the shared 20 Hz policy preset. Surroundings and robot
 placement use the common workcell layout.
 The task starts with the passive drawer already open and requires grasp/lift,
-release inside and contact-driven closure.
+release inside and contact-driven closure; no process failure ends an episode.
 """
 
 from mjlab.envs import ManagerBasedRlEnvCfg
@@ -167,7 +167,6 @@ def make_env_cfg(*, play=False, reset_bank=None):
             "success": TerminationTermCfg(
                 func=mdp.SequenceSuccess, params={"task_contract": bank_contract()}
             ),
-            "process_failure": TerminationTermCfg(func=mdp.process_failure),
         },
         sim=SimulationCfg(
             # Pushing the drawer with compound fingertips needed more than 1024

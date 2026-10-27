@@ -79,10 +79,6 @@ class SequenceSuccess(ManagerTermBase):
         )
 
 
-def process_failure(env):
-    return sequence(env).failed
-
-
 def success_reward(env):
     return env.termination_manager.get_term("success").float()
 

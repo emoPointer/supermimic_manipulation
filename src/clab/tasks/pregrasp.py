@@ -107,8 +107,7 @@ class DrawerPregrasp:
         self.name = RESET_TYPES[-1]
 
     def configure(self, cfg):
-        for name in ("success", "process_failure"):
-            cfg.terminations.pop(name, None)
+        cfg.terminations.pop("success", None)
 
     def touching(self, env):
         return (

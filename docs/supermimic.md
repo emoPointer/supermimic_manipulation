@@ -63,11 +63,11 @@ increments (28-D, 30-D for Drawer); rotation increments are SO(3) tangent vector
 | `lemon` | 40 | 145 | 195 | same |
 | `square` | 40 | 145 | 195 | same |
 | `mug_hang` | 40 | 229 | 210 | same |
-| `drawer` | 56 | 161 | 275 | rollout state without its 14 process columns + context + actor history |
+| `drawer` | 55 | 161 | 265 | rollout state without its 13 process columns + context + actor history |
 
 Drawer's actor and critic see its physical sequence only as the stage and the history the
 rest of the episode still depends on: each stage's references and counters during that stage
-(zero elsewhere), the failure and success flags. The reset prefix, the episode's
+(zero elsewhere) and the success flag. The reset prefix, the episode's
 accomplishments and the initial slide never change the outcome and are not observed, so a pod
 released in the drawer looks the same whether it was released in this episode or before a
 `PodReleasedInOpenDrawer` reset. With them observed, the critic valued a pod a
@@ -135,21 +135,19 @@ their imagination adds a far term 1 − tanh(distance / `far_reaching_scale`, 0.
 handle or pod; Drawer averages the two, keeping the native range [0, 1].
 
 Square and Drawer also make letting go visible to the actor. Without this, every grasped start
-category ended with the gripper opened on the first step: the grasp tests and Drawer's failure
-latch are hard, so their derivative is zero, while the dropped object falling toward its
-target improved the smooth terms.
+category ended with the gripper opened on the first step: the grasp tests are hard, so their
+derivative is zero, while the dropped object falling toward its target improved the smooth
+terms.
 
 - Their grasp proxies are straight-through in the closed-on-object finger band, so the rewards
   that need a grasp show that opening the gripper loses them.
-- Drawer's `done` uses the native failure event in the forward pass. Backward, it uses the
-  derivative of the active stage's failure condition (grasp lost after it was confirmed but
-  before the lift, pod released outside the drawer, pod re-grasped or outside the drawer while
-  closing), so the actor sees that failing forfeits the rest of the imagined return. That
-  derivative still reaches the gripper only through the world model's finger prediction, so
+- That derivative reaches the gripper only through the world model's finger prediction, so
   Drawer also shapes the raw command: opening a held pod costs `outside_release_penalty` (2)
-  in the lift stage and, in the release stage, outside the drawer; keeping the gripper closed
-  once the pod is inside costs `inside_hold_cost` (2 per second). Without the lift-stage cost
-  the grasped-on-table starts learned to open at once, which fails natively.
+  in the lift stage and, in the release stage, unless the pod is over the drawer opening (the
+  inside footprint at any height), from where it drops into the drawer; keeping the gripper
+  closed once the pod is inside costs `inside_hold_cost` (2 per second). Without the
+  lift-stage cost the grasped-on-table starts learned to open at once and dropped the pod.
+  Drawer's imagined `done` is success or the time limit, as natively.
 - Square shapes the release on the raw gripper command, whose straight-through derivative
   acts directly; through the world model's finger prediction, which is trained only at the two
   binary targets, the derivative was too weak to change a decision. A nut over the peg drops

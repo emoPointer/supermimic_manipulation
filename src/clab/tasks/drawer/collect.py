@@ -653,9 +653,6 @@ def collect(
     cfg.events.pop("reset_from_bank")
     cfg.rewards = {}
     cfg.terminations.pop("time_out")
-    # The collector rejects failed worlds itself immediately after each control
-    # step. Parking them must not request another terminal reset on every step.
-    cfg.terminations.pop("process_failure")
     cfg.auto_reset = False
     model = Scene(cfg.scene, device="cpu").compile()
     ik = make_kinematic_witness() if proposal_workers == 1 else None
@@ -668,6 +665,10 @@ def collect(
     collected = {kind: {key: [] for key in FIELDS} for kind in COLLECTED_TYPES}
     successes, rejections, batches = [], Counter(), []
     env = ManagerBasedRlEnv(cfg=cfg, device=device)
+    # Rows must come from one unbroken process: any lost grasp, outside release or
+    # escape latches failure, and the collector rejects that world itself after the
+    # control step (the task never fails, so no termination resets it).
+    mdp.sequence(env).strict = True
     try:
         free_joint_damping = joint_damping_metadata(env.sim.mj_model, "pod/pod_free")
         # Compile reset/forward/sense before optional capture on old drivers.

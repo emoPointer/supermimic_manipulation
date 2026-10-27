@@ -14,7 +14,7 @@ complete-episode evaluator.
 | `lemon` | Put a lemon on a plate and release it | 32 s | 195 / 153 | 4 |
 | `square` | Thread a square nut onto its peg and release it | 16 s | 195 / 153 | 5 |
 | `mug_hang` | Hang a mug on a tree by its handle | 16 s | 210 / 240 | 4 |
-| `drawer` | Put a pod into an open drawer and push the drawer closed | 60 s | 300 / 81 | 6 |
+| `drawer` | Put a pod into an open drawer and push the drawer closed | 60 s | 265 / 74 | 7 |
 
 The arm is driven by an operational-space controller (OSC) at a 20 Hz policy rate and
 480 Hz physics. Every task uses the same 7-D action: a relative end-effector pose command in

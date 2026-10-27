@@ -116,13 +116,23 @@ Pick up a coffee pod, put it into an already opened drawer, and push the drawer 
 | --- | --- |
 | Props | Free pod; fixed housing with a passive drawer slide (range [0, 0.14] m) that starts open at 0.13 m |
 | Horizon | 60 s |
-| Observations | actor 300 and critic 81, including a 19-D physical-sequence history |
+| Observations | actor 265 and critic 74, including the 12-D stage-masked physical-sequence observation |
 | Rewards | `reaching` 0.2, `progress` 0.2, the shared action/joint costs, `success` +10 |
-| Process | Stable two-finger grasp for 0.3 s and lift ≥ 0.04 m → release inside the drawer for 0.3 s → contact push closing the slide by ≥ 0.015 m |
+| Process | Stable two-finger grasp for 0.3 s and lift ≥ 0.04 m → release inside the drawer for 0.3 s → contact push closing the slide by ≥ 0.015 m; nothing ends the episode early (below) |
 | Success | Process complete, slide q < 0.03 m, pod inside the drawer and not grasped; held 0.5 s |
 | Reset types | See below |
 | Bank frame | Environment-local world (positions minus the environment origin) |
 | Reset placement | Pod X [0.075, 0.205], Y [0.090, 0.250], yaw ±18°; housing X [0.325, 0.335], Y [−0.080, −0.040], yaw [165°, 195°] |
+
+No process failure ends an episode. A grasp lost before the lift starts the grasp again,
+a pod released anywhere may still come to rest in the drawer or be grasped again, and a
+pod grasped again or out of the drawer while closing returns the sequence to the release
+stage. Released from the `PodHeldAboveOpenDrawer` pose, 12 cm above the drawer bottom, the
+pod lands inside the drawer in all of 256 trials; the earlier rules counted that as a
+release outside the drawer (centre not yet below 0.06 m) and ended the episode, and the
+transport categories learned to hold the pod beside the drawer until the time limit.
+Reset collection keeps those strict rules (`PhysicalSequence(strict=True)`), so every
+bank row still comes from one unbroken process.
 
 Drawer is a long-horizon task, so its reset bank holds six snapshots of one complete
 physical trajectory, plus a pre-grasp state derived from the grasped snapshot (see below).
