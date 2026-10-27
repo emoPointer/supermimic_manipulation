@@ -63,7 +63,16 @@ increments (28-D, 30-D for Drawer); rotation increments are SO(3) tangent vector
 | `lemon` | 40 | 145 | 195 | same |
 | `square` | 40 | 145 | 195 | same |
 | `mug_hang` | 40 | 229 | 210 | same |
-| `drawer` | 56 | 161 | 300 | same |
+| `drawer` | 56 | 161 | 275 | rollout state without its 14 process columns + context + actor history |
+
+Drawer's actor and critic see its physical sequence only as the stage and the history the
+rest of the episode still depends on: each stage's references and counters during that stage
+(zero elsewhere), the failure and success flags. The reset prefix, the episode's
+accomplishments and the initial slide never change the outcome and are not observed, so a pod
+released in the drawer looks the same whether it was released in this episode or before a
+`PodReleasedInOpenDrawer` reset. With them observed, the critic valued a pod a
+`PodHeldAboveOpenDrawer` episode had just released at −1.8 and the same pod at that reset at
++6, and the transport categories never learned to release it in the drawer.
 
 The world model sees the executed command: the action clipped to the controller input
 limit, scaled, and bounded in norm per step exactly as the OSC action does; the gripper is

@@ -43,7 +43,7 @@ class PhysicalSequence:
     solely events witnessed since this reset. Counts use physical durations.
     """
 
-    observation_dim = 19
+    observation_dim = 13
 
     def __init__(self, count, device, control_dt):
         self.stage = torch.zeros(count, dtype=torch.long, device=device)
@@ -145,20 +145,28 @@ class PhysicalSequence:
         return self.success
 
     def observation(self):
+        """The stage and the history the rest of the episode still depends on.
+
+        Each stage's references and counters are observed only in that stage (zero
+        elsewhere); the reset prefix, this episode's accomplishments and the initial
+        slide, which never change the outcome, are not observed. A pod released in
+        the drawer then looks the same whether the release happened in this episode
+        or before a PodReleasedInOpenDrawer reset. With them observed, the critic
+        valued a pod a PodHeldAboveOpenDrawer episode had just released at -1.8 and
+        the same pod at that reset at +6, so placing it was never learned.
+        """
+        lift, release, push, hold = (self.stage == k for k in range(4))
         columns = (
             torch.nn.functional.one_hot(self.stage, 4).float(),
-            self.prefix.float(),
-            self.accomplished.float(),
             torch.stack(
                 (
-                    self.initial_q,
-                    self.initial_pod_z,
-                    self.close_q,
-                    self.grasp_count / self.grasp_steps,
-                    self.release_count / self.release_steps,
-                    self.final_count / self.success_steps,
-                    self.grasp_confirmed.float(),
-                    self.push_contact.float(),
+                    self.initial_pod_z * lift,
+                    self.grasp_count / self.grasp_steps * lift,
+                    self.grasp_confirmed.float() * lift,
+                    self.release_count / self.release_steps * release,
+                    self.close_q * push,
+                    self.push_contact.float() * push,
+                    self.final_count / self.success_steps * hold,
                     self.failed.float(),
                     self.success.float(),
                 ),

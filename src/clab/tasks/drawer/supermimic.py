@@ -14,7 +14,7 @@ import torch
 from clab.controllers.torch_kinematics import quat_apply, quat_inverse, six_to_quat
 from clab.tasks.supermimic import RigidObjectAdapter, RigidObjectMDP
 
-from .process import final_candidate, pod_inside
+from .process import PhysicalSequence, final_candidate, pod_inside
 from .settings import GRASP_SECONDS, MIN_CLOSE_DELTA, MIN_POD_LIFT, RELEASE_SECONDS
 
 # Front panel outer face in drawer-local x, its half-width and height span.
@@ -42,7 +42,7 @@ class DrawerMDP(RigidObjectMDP):
     task = "drawer"
     object_name = "pod"
     target_name = "housing"
-    actor_widths = (6, 7, 8, 6, 6, 6, 2, 19)
+    actor_widths = (6, 7, 8, 6, 6, 6, 2, PhysicalSequence.observation_dim)
     reward_mode = "imagined_physical_sequence_with_geometric_contact_proxies"
     process_fields = tuple(name for name, _ in _PROCESS)
     # Pod grasps hold each finger at ~0.024 m (pod diameter ~48 mm).
@@ -62,6 +62,13 @@ class DrawerMDP(RigidObjectMDP):
         **kwargs,
     ):
         super().__init__(action_bound_weight=action_bound_weight, **kwargs)
+        process = [self.state.slices[name] for name, _ in _PROCESS]
+        if process[-1].stop != self.state_dim or any(
+            a.stop != b.start for a, b in zip(process, process[1:], strict=False)
+        ):
+            raise ValueError("Drawer process fields must end the rollout state")
+        self._process_start = process[0].start
+        self.critic_dim -= self.state_dim - self._process_start
         for name, value in (
             ("outside_release_penalty", outside_release_penalty),
             ("inside_hold_cost", inside_hold_cost),
@@ -230,28 +237,37 @@ class DrawerMDP(RigidObjectMDP):
         super().advance_task_fields(fields, s, c)
 
     def extra_observation(self, s, c):
+        """Slide state and the native stage-masked process observation."""
         g = self.state.get
         stage = self._field(s, "stage").round().long().clamp(0, 3)
         count = self._field(s, "success_count")
+        onehot = torch.nn.functional.one_hot(stage, 4).to(s.dtype)
+        lift, release, push, hold = onehot[:, 0:1], onehot[:, 1:2], onehot[:, 2:3], onehot[:, 3:4]
         process = torch.cat(
             (
-                torch.nn.functional.one_hot(stage, 4).to(s.dtype),
-                g(s, "prefix"),
-                g(s, "accomplished"),
-                g(s, "initial_q"),
-                g(s, "initial_pod_z"),
-                g(s, "close_q"),
-                g(s, "grasp_count") / self.grasp_steps,
-                g(s, "release_count") / self.release_steps,
-                count[:, None] / self.required_steps,
-                g(s, "grasp_confirmed"),
-                g(s, "push_contact"),
+                onehot,
+                g(s, "initial_pod_z") * lift,
+                g(s, "grasp_count") / self.grasp_steps * lift,
+                g(s, "grasp_confirmed") * lift,
+                g(s, "release_count") / self.release_steps * release,
+                g(s, "close_q") * push,
+                g(s, "push_contact") * push,
+                count[:, None] / self.required_steps * hold,
                 g(s, "failed"),
                 (count >= self.required_steps).to(s.dtype)[:, None],
             ),
             -1,
         )
         return torch.cat((g(s, "slide_q"), g(s, "slide_dq")), -1), process
+
+    def critic_features(self, s, c, obs):
+        """Rollout state without the raw process fields, context and actor history.
+
+        The process reaches the critic only through the stage-masked observation
+        (PhysicalSequence.observation), so equal futures get equal inputs whichever
+        reset category the episode started from.
+        """
+        return torch.cat((s[..., : self._process_start], c, obs), -1)
 
     def reward(self, s, a, s1, c):
         stage = self._field(s1, "stage")
