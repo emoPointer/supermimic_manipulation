@@ -33,7 +33,7 @@ def policy(argv: list[str], prog: str) -> None:
         default="development",
     )
     parser.add_argument("--training-env-config", type=Path, help="Default: RUN/params/env.yaml")
-    parser.add_argument("--cuda-graph-mode", choices=("auto", "plain"), default="auto")
+    parser.add_argument("--cuda-graph-mode", choices=("auto", "plain", "substeps"), default="auto")
     args = parser.parse_args(argv)
     from clab.evaluation.policy import evaluate_policy
 

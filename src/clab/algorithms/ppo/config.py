@@ -12,7 +12,7 @@ class ClabPpoRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     logging_backend: Literal["both", "tensorboard"] = "both"
 
-    cuda_graph_mode: Literal["auto", "plain"] = "auto"
+    cuda_graph_mode: Literal["auto", "plain", "substeps"] = "auto"
 
     upload_model: bool = False
 

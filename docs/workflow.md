@@ -28,6 +28,7 @@ training keeps it.
 | `--split` | Label stored in the bank; use separate seeds and splits for training and evaluation banks |
 | `--seed S` | Proposal and physics seed |
 | `--cuda-graph-mode plain` | Use plain CUDA graphs (needed on drivers older than CUDA 12.4) |
+| `--cuda-graph-mode substeps` | Plain graphs, and the whole decimation loop of each policy step (OSC, actuators, physics, sensor updates) replayed from CUDA graph segments; bitwise the same results with far fewer kernel launches |
 
 Square and MugHang build their insertion/threading categories in stages
 (`--insertion-per-stage`); for Square use it (for example `--per-type 9999

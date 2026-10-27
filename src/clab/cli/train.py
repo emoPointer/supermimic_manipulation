@@ -28,7 +28,7 @@ def ppo(argv: list[str], prog: str) -> None:
     parser.add_argument(
         "--resume", type=Path, help="Continue from LOG_ROOT/<experiment>/RUN/model_N.pt"
     )
-    parser.add_argument("--cuda-graph-mode", choices=("auto", "plain"), default="auto")
+    parser.add_argument("--cuda-graph-mode", choices=("auto", "plain", "substeps"), default="auto")
     parser.add_argument("--wandb-entity", help="Also log metrics to this Weights & Biases entity")
     parser.add_argument("--gpu-ids", type=int, nargs="+", default=[0])
     parser.add_argument(
@@ -79,7 +79,7 @@ def supermimic(argv: list[str], prog: str) -> None:
     parser.add_argument("--njmax", type=int)
     parser.add_argument("--resume", type=Path, help="Approximate continuation from a checkpoint")
     parser.add_argument("--logger", choices=("tensorboard", "none"), default="tensorboard")
-    parser.add_argument("--cuda-graph-mode", choices=("auto", "plain"), default="auto")
+    parser.add_argument("--cuda-graph-mode", choices=("auto", "plain", "substeps"), default="auto")
     parser.add_argument(
         "--smoke", action="store_true", help="Tiny networks and budgets; checks save and reload"
     )

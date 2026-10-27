@@ -54,7 +54,7 @@ class ClabPpoRunner(MjlabOnPolicyRunner):
         elif reward_source != "native":
             raise ValueError(f"Unsupported PPO reward source: {reward_source}")
         configure_cuda_graph(env.unwrapped, graph_mode)
-        if graph_mode == "plain":
+        if graph_mode in ("plain", "substeps"):
             env.reset()  # Discard the warmup state before PPO starts collecting.
         super().__init__(env, train_cfg, log_dir, device)
         # A world whose physics diverged is terminated and reset by the task;
