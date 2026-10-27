@@ -5,16 +5,24 @@ seating with base support and no penetration, low speed and full release; a
 two-finger ring or mixed grasp ends the episode as invalid. Imagination carries
 the native ``grasp_seen`` and ``invalid`` flags as analytic state and replaces
 the contact predicates by grasp-point geometry in the nut frame plus a closed-
-on-object finger band. Seating keeps the native threaded/height/tilt geometry;
-support force and penetration are not modelled. Native real rewards and
-evaluation remain authoritative.
+on-object finger band, and the release by the fingers' collision boxes clearing
+the nut's. Seating keeps the native threaded/height/tilt geometry; support force
+and penetration are not modelled. Native real rewards and evaluation remain
+authoritative.
 """
 
 import math
 
 import torch
 
-from clab.controllers.torch_kinematics import quat_apply, quat_inverse, six_to_quat
+from clab.controllers.torch_kinematics import (
+    quat_apply,
+    quat_inverse,
+    quat_mul,
+    quat_to_matrix,
+    six_to_quat,
+)
+from clab.robots.tool_geometry import finger_boxes
 from clab.tasks.supermimic import RigidObjectAdapter, RigidObjectMDP
 from clab.tensors import constant
 
@@ -27,6 +35,11 @@ _RING_OUTER = max(position[0] + size[0] for position, size in NUT_BOXES[:4])
 # Peg-local nut centre held above the peg top, mid-range of the collector's
 # above-peg clearance (0.015-0.040 m).
 _ABOVE_PEG = PEG_HALF_HEIGHT + NUT_HALF_HEIGHT + 0.025
+# Finger collision boxes: the pad within 2 cm behind the grasp point (the tips reach
+# 1.3 cm past it) and the rest of the finger. One box for the whole finger was so
+# loose (its base is wide) that it rarely read a natively released seated nut as
+# released; the split recovers most of them, and finer bands add little.
+_FINGER_DEPTHS = (0.02, 0.2)
 
 
 def _apply_inverse(quaternion, vector):
@@ -53,6 +66,8 @@ class SquareMDP(RigidObjectMDP):
         tilt_scale,
         insertion_scale,
         grip_band=(0.008, 0.020),
+        finger_boxes,
+        release_clearance=0.001,
         carry_weight=0.2,
         early_release_penalty=2.0,
         release_radius=0.01,
@@ -66,6 +81,7 @@ class SquareMDP(RigidObjectMDP):
             ("early_release_penalty", early_release_penalty),
             ("release_radius", release_radius),
             ("peg_hold_cost", peg_hold_cost),
+            ("release_clearance", release_clearance),
         ):
             if not 0 <= value < float("inf"):
                 raise ValueError(f"{name} must be finite and nonnegative")
@@ -73,6 +89,7 @@ class SquareMDP(RigidObjectMDP):
         self.early_release_penalty = float(early_release_penalty)
         self.release_radius = float(release_radius)
         self.peg_hold_cost = float(peg_hold_cost)
+        self.release_clearance = float(release_clearance)
         self.criteria = criteria
         self.reaching_scale = float(reaching_scale)
         self.far_reaching_scale = float(far_reaching_scale)
@@ -83,6 +100,37 @@ class SquareMDP(RigidObjectMDP):
         self.grip_band = tuple(float(value) for value in grip_band)
         if not 0 < self.grip_band[0] < self.grip_band[1] < self.release_opening:
             raise ValueError("grip_band must be ordered and below release_opening")
+        self.finger_boxes = tuple(
+            tuple(tuple(tuple(float(v) for v in part) for part in box) for box in bands)
+            for bands in finger_boxes
+        )
+        boxes = [(finger, box) for finger, bands in enumerate(self.finger_boxes) for box in bands]
+        if (
+            len(self.finger_boxes) != 2
+            or not all(self.finger_boxes)
+            or any(
+                len(box) != 3
+                or any(len(part) != 3 or not all(math.isfinite(v) for v in part) for part in box)
+                for _, box in boxes
+            )
+        ):
+            raise ValueError(
+                "finger_boxes must hold finite (lower, upper, direction) boxes per finger"
+            )
+        if any(
+            lo >= hi for _, (lower, upper, _) in boxes for lo, hi in zip(lower, upper, strict=True)
+        ):
+            raise ValueError("finger boxes must have positive extent")
+        self._box_finger = tuple(finger for finger, _ in boxes)
+        self._box_centre = tuple(
+            tuple((lo + hi) / 2 for lo, hi in zip(lower, upper, strict=True))
+            for _, (lower, upper, _) in boxes
+        )
+        self._box_half = tuple(
+            tuple((hi - lo) / 2 for lo, hi in zip(lower, upper, strict=True))
+            for _, (lower, upper, _) in boxes
+        )
+        self._box_direction = tuple(direction for _, (_, _, direction) in boxes)
 
     def _frames(self, s, c):
         return (
@@ -111,19 +159,38 @@ class SquareMDP(RigidObjectMDP):
         fingers = self.state.get(s, "robot_q")[:, 6:8]
         return self._gate(fingers - self.grip_band[1], self.release_temperature).prod(-1)
 
-    def _released(self, s):
-        """Not both fingers inside grip_band, the proxy for no nut-robot contact.
+    def _finger_gap(self, s, c):
+        """Smallest separation [N] between a finger collision box and a nut box.
 
-        Native release only requires the contact to end: a finger that opens past
-        the band, or closes beside the handle, no longer grips it. Requiring both
-        fingers past release_opening missed most native releases.
+        Each finger box (pad and rest of finger), posed in the nut frame by the arm
+        joints and its finger's opening, is bounded by an axis-aligned box; a pair's
+        separation is its largest per-axis gap (<= 0 where the bounds overlap). Wrist yaw only enlarges the
+        bound, so a skewed hand reads as closer, never farther.
         """
-        fingers = self.state.get(s, "robot_q")[:, 6:8]
-        low, high = self.grip_band
-        inside = self._gate(fingers - low, self.release_temperature) * self._gate(
-            high - fingers, self.release_temperature
+        nut, nut_quat, _, _ = self._frames(s, c)
+        grasp, tool_quat = self.physical_tool(s, c)
+        rotation = quat_to_matrix(quat_mul(quat_inverse(nut_quat), tool_quat))
+        local = _apply_inverse(nut_quat, grasp - nut)
+        opening = self.state.get(s, "robot_q")[:, 6:8][:, list(self._box_finger)]
+        tool_centre = s.new_tensor(self._box_centre) + opening[..., None] * s.new_tensor(
+            self._box_direction
         )
-        return 1 - inside.prod(-1)
+        centre = local[:, None] + torch.einsum("nij,nkj->nki", rotation, tool_centre)
+        half = torch.einsum("nij,kj->nki", rotation.abs(), s.new_tensor(self._box_half))
+        boxes = s.new_tensor(NUT_BOXES)  # [box, (centre, half), 3]
+        gap = (centre[:, :, None] - boxes[:, 0]).abs() - (half[:, :, None] + boxes[:, 1])
+        return gap.amax(-1).amin(-1).amin(-1)
+
+    def _hands_off(self, s, c):
+        """Both fingers clear of the nut by release_clearance, the proxy for no nut-robot contact.
+
+        Native release is the end of every nut-robot contact. Its previous proxy, not
+        both fingers inside grip_band, counted an opened hand as released, and most
+        stalled seated nuts still had one open finger pressing on the ring (about
+        1.5 N), so imagination counted successes the native test never did.
+        Straight-through on the smallest finger-nut separation.
+        """
+        return self._gate(self._finger_gap(s, c) - self.release_clearance, self.release_temperature)
 
     def grasp_status(self, s, c):
         """Proxies for native (legal handle grasp, wrong ring or mixed grasp).
@@ -170,7 +237,7 @@ class SquareMDP(RigidObjectMDP):
 
     def _candidate(self, s, c):
         valid = self._flag(s, "grasp_seen") * (1 - self._flag(s, "invalid"))
-        return self._seated(s, c) * self._stable(s) * self._released(s) * valid
+        return self._seated(s, c) * self._stable(s) * self._hands_off(s, c) * valid
 
     def advance_task_fields(self, fields, s, c):
         provisional = self.state.pack(fields)
@@ -274,7 +341,11 @@ class SquareMDP(RigidObjectMDP):
 
     def task_contract(self):
         return {
-            "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, not both fingers inside grip_band (release proxy), grasp_seen and not invalid; no support-force, penetration or contact test",
+            "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, both fingers' collision boxes (finger_boxes: per finger the pad within 2 cm of the grasp point and the rest, link6 axes, posed by the arm joints and finger openings, bounded axis-aligned in the nut frame) at least release_clearance from every nut box (release proxy, straight-through), grasp_seen and not invalid; no support-force, penetration or contact test",
+            "finger_boxes": [
+                [list(map(list, box)) for box in bands] for bands in self.finger_boxes
+            ],
+            "release_clearance": self.release_clearance,
             "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band (the legal grasp straight-through in the band); replaces force-bearing finger contact classification",
             "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
             "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the handle is grasped or the nut threaded; reaching also pays while grasped, pays only an open hand (both fingers past grip_band) or a legal grasp, and adds a far term 1 - tanh(distance / far_reaching_scale); handle_grasp and alignment gated off once threaded; imagination only",
@@ -331,6 +402,9 @@ class SquareAdapter(RigidObjectAdapter):
         super().__init__(
             env,
             criteria=AssemblyCriteria(**criteria) if isinstance(criteria, dict) else criteria,
+            finger_boxes=finger_boxes(
+                env.sim.mj_model, robot=self.robot_binding(), depths=_FINGER_DEPTHS
+            ),
             reaching_scale=rewards["reaching"].params["distance_scale"],
             alignment_scale=rewards["alignment"].params["distance_scale"],
             tilt_scale=rewards["alignment"].params["tilt_scale"],

@@ -84,7 +84,7 @@ the reduced state, so each task replaces them with geometric surrogates:
 | --- | --- |
 | `box_in_bin` | Native placement geometry; speeds below 0.03 m/s and 0.5 rad/s (native 0.01 and 0.1); both fingers opened past 0.028 m |
 | `lemon` | Native centre XY and height thresholds; height at most `contact_margin` (0.01 m) above the resting height as the contact proxy; both fingers opened past 0.023 m |
-| `square` | Native threaded/height/tilt geometry; handle versus ring grasp from the grasp point in the nut frame and a closed-on-object finger band, carried as `grasp_seen`/`invalid` flags; released when not both fingers are inside that band; looser speeds |
+| `square` | Native threaded/height/tilt geometry; handle versus ring grasp from the grasp point in the nut frame and a closed-on-object finger band, carried as `grasp_seen`/`invalid` flags; released when both fingers' collision boxes clear every nut box by `release_clearance` (1 mm); looser speeds |
 | `mug_hang` | Native tree-frame envelope and handle-on-bar geometry; looser speed limit; both fingers opened past 0.015 m |
 | `drawer` | Native physical-sequence update rules; pod grasp from grasp-point distance (`grasp_radius` 0.03 m) and finger band; push contact from the grasp point at the front panel; native final candidate |
 
@@ -145,6 +145,13 @@ target improved the smooth terms.
   closed while the nut is threaded costs `peg_hold_cost` (2 per second); and holding stops
   paying once the nut is threaded (natively once seated), since pushing a threaded nut down by
   its handle tilts and jams it, while released it slides down and seats.
+- Square's release proxy is geometric: each finger's collision boxes (its pad within 2 cm of
+  the grasp point and the rest of the finger), posed by the arm joints and its opening, must
+  clear every nut box by `release_clearance` (1 mm). Native release is
+  the end of every nut-robot contact. The previous proxy, not both fingers inside the finger
+  band, counted any opened hand as released: in most stalled episodes the nut was seated but
+  one open finger still pressed on the ring (about 1.5 N), and imagination counted a success
+  the native test never did, so nothing taught the hand to move away.
 - These release costs use the native binary decision forward and a hinge derivative
   backward: constant until the raw command is past the decision boundary by `gripper_margin`
   (1), zero beyond. A sigmoid derivative vanishes on a saturated command (Square's reached
@@ -159,7 +166,7 @@ These settings are recorded in `params/mdp.json` and can be overridden with
 `--adapter-option NAME=VALUE` (`stable_linear_speed`, `stable_angular_speed`,
 `release_opening`, `release_weight`, `success_gradient_scale`, `action_bound_weight`,
 `gripper_bound`, `gripper_margin`; Lemon also `contact_margin`, MugHang and Square
-also `carry_weight`, Square also `early_release_penalty`, `release_radius` and `peg_hold_cost`,
+also `carry_weight`, Square also `early_release_penalty`, `release_radius`, `peg_hold_cost` and `release_clearance`,
 Drawer also `grasp_radius`, `outside_release_penalty` and `inside_hold_cost`). Real collection and evaluation always use the native reward
 and success.
 

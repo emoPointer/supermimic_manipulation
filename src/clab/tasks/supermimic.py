@@ -425,7 +425,8 @@ class RigidObjectMDP:
     def reward(self, s, a, s1, c):
         raise NotImplementedError
 
-    def physical_grasp(self, s, c):
+    def physical_tool(self, s, c):
+        """World grasp point and link6 orientation from the arm joints."""
         position, quaternion = serial_chain_fk(
             self.state.get(s, "robot_q")[:, :6], self.physical_links
         )
@@ -433,7 +434,13 @@ class RigidObjectMDP:
             quaternion, constant(s, self.grasp_offset).expand_as(position)
         )
         base_quat = six_to_quat(self.context.get(c, "base_rotation"))
-        return self.context.get(c, "base_position") + quat_apply(base_quat, position)
+        return (
+            self.context.get(c, "base_position") + quat_apply(base_quat, position),
+            quat_mul(base_quat, quaternion),
+        )
+
+    def physical_grasp(self, s, c):
+        return self.physical_tool(s, c)[0]
 
     def integrate(self, s, delta, a, c):
         fields = {name: self.state.get(s, name) for name in self.state.slices}
