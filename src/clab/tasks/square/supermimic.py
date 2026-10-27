@@ -1,14 +1,12 @@
 """Square SuperMimic surrogate: nut threaded, seated, released and at rest.
 
-Native success needs a legal exposed-handle grasp observed earlier, physical
-seating with base support and no penetration, low speed and full release; a
-two-finger ring or mixed grasp ends the episode as invalid. Imagination carries
-the native ``grasp_seen`` and ``invalid`` flags as analytic state and replaces
-the contact predicates by grasp-point geometry in the nut frame plus a closed-
-on-object finger band, and the release by the fingers' collision boxes clearing
-the nut's. Seating keeps the native threaded/height/tilt geometry; support force
-and penetration are not modelled. Native real rewards and evaluation remain
-authoritative.
+Native success needs physical seating with base support and no penetration, low
+speed and full release, however the nut was grasped. Imagination replaces the
+contact predicates by geometry: a grasp is the grasp point inside a nut box with
+both fingers in a closed-on-object band, and the release is the fingers'
+collision boxes clearing the nut's. Seating keeps the native threaded/height/tilt
+geometry; support force and penetration are not modelled. Native real rewards
+and evaluation remain authoritative.
 """
 
 import math
@@ -30,8 +28,6 @@ from .mdp import threaded_geometry
 from .props import NUT_BOXES, NUT_GRASP_POINT, NUT_HALF_HEIGHT, NUT_SEATED_OFFSET, PEG_HALF_HEIGHT
 from .settings import AssemblyCriteria
 
-_HANDLE_CENTRE, _HANDLE_HALF = NUT_BOXES[4]
-_RING_OUTER = max(position[0] + size[0] for position, size in NUT_BOXES[:4])
 # Peg-local nut centre held above the peg top, mid-range of the collector's
 # above-peg clearance (0.015-0.040 m).
 _ABOVE_PEG = PEG_HALF_HEIGHT + NUT_HALF_HEIGHT + 0.025
@@ -50,8 +46,7 @@ class SquareMDP(RigidObjectMDP):
     task = "square"
     object_name = "nut"
     target_name = "peg"
-    reward_mode = "imagined_endpoint_grasp_flags_seating_release"
-    process_fields = ("grasp_seen", "invalid")
+    reward_mode = "imagined_endpoint_grasp_seating_release"
     # Handle grasps hold each finger at 0.011-0.018 m (grasped reset rows).
     held_width = 0.0148
     release_opening = 0.024
@@ -155,7 +150,7 @@ class SquareMDP(RigidObjectMDP):
         return self._band(fingers, low, high, self.release_temperature).prod(-1)
 
     def _open(self, s):
-        """Both fingers opened past grip_band, ready to close around the handle."""
+        """Both fingers opened past grip_band, ready to close around the nut."""
         fingers = self.state.get(s, "robot_q")[:, 6:8]
         return self._gate(fingers - self.grip_band[1], self.release_temperature).prod(-1)
 
@@ -192,22 +187,19 @@ class SquareMDP(RigidObjectMDP):
         """
         return self._gate(self._finger_gap(s, c) - self.release_clearance, self.release_temperature)
 
-    def grasp_status(self, s, c):
-        """Proxies for native (legal handle grasp, wrong ring or mixed grasp).
+    def holding(self, s, c):
+        """Proxy for the native grasp: both fingers bearing on the nut, anywhere on it.
 
-        The legal grasp is straight-through in the finger band; the wrong grasp is hard.
+        The grasp point lies inside a nut box widened by the contact tolerance across
+        the slab and by its half-height along the normal, and both fingers are within
+        grip_band. Straight-through in the finger band.
         """
         local = self._grasp_local(s, c)
-        gripping = self._gripping(s)
-        near_slab = local[:, 2].abs() <= 2 * NUT_BOXES[0][1][2]
-        handle = (
-            (local[:, 0] >= _RING_OUTER + self.criteria.handle_clearance)
-            & (local[:, 0] <= _HANDLE_CENTRE[0] + _HANDLE_HALF[0])
-            & (local[:, 1].abs() <= _HANDLE_HALF[1] + self.criteria.contact_tolerance)
-        )
-        ring = (local[:, 0] < _RING_OUTER) & (local[:, 1].abs() <= _RING_OUTER)
-        legal = gripping * (near_slab & handle).to(gripping.dtype)
-        return legal, (gripping.detach() > 0.5) & near_slab & ring
+        boxes = s.new_tensor(NUT_BOXES)  # [box, (centre, half), 3]
+        tolerance = self.criteria.contact_tolerance
+        margin = s.new_tensor((tolerance, tolerance, NUT_BOXES[0][1][2]))
+        inside = ((local[:, None] - boxes[:, 0]).abs() <= boxes[:, 1] + margin).all(-1).any(-1)
+        return self._gripping(s) * inside.to(s.dtype)
 
     def _tilt(self, s, c):
         _, nut_quat, _, peg_quat = self._frames(s, c)
@@ -232,39 +224,25 @@ class SquareMDP(RigidObjectMDP):
         soft = torch.sigmoid(margins / self.smooth_temperature).prod(-1)
         return threaded * (hard + (soft - soft.detach()))
 
-    def _flag(self, s, name):
-        return self.state.get(s, name).squeeze(-1)
-
     def _candidate(self, s, c):
-        valid = self._flag(s, "grasp_seen") * (1 - self._flag(s, "invalid"))
-        return self._seated(s, c) * self._stable(s) * self._hands_off(s, c) * valid
-
-    def advance_task_fields(self, fields, s, c):
-        provisional = self.state.pack(fields)
-        grasped, wrong = self.grasp_status(provisional, c)
-        invalid = torch.maximum(self.state.get(s, "invalid"), wrong.to(s.dtype)[:, None])
-        legal = grasped.detach()[:, None] * (1 - invalid)
-        fields["invalid"] = invalid
-        fields["grasp_seen"] = torch.maximum(self.state.get(s, "grasp_seen"), legal)
-        super().advance_task_fields(fields, s, c)
+        return self._seated(s, c) * self._stable(s) * self._hands_off(s, c)
 
     def reward(self, s, a, s1, c):
         nut, nut_quat, peg, peg_quat = self._frames(s1, c)
-        grasped, _ = self.grasp_status(s1, c)
-        grasped = grasped.to(s1.dtype)
-        invalid, grasp_seen = self._flag(s1, "invalid"), self._flag(s1, "grasp_seen")
-        valid = 1 - invalid
+        holding = self.holding(s1, c)
         seated = self._seated(s1, c).detach()
+        # Reaching aims at the handle, the grasp that leaves the hole free for the peg;
+        # any grasp still counts as one.
         handle = nut + quat_apply(nut_quat, constant(nut, NUT_GRASP_POINT).expand_as(nut))
-        # Imagination-only: the native reaching term stops while the handle is
+        # Imagination-only: the native reaching term stops while the nut is
         # grasped, so an open gripper hovering at the handle (0.2) paid more than
-        # holding it (handle_grasp 0.1) and the policy released at once. Keep
-        # paying reaching while grasped; it still stops once the nut is seated.
-        approach = valid * (1 - seated * grasp_seen)
-        # Imagination-only: reaching pays only an open hand or a legal grasp. The
+        # holding it (grasp 0.1) and the policy released at once. Keep paying
+        # reaching while grasped; it still stops once the nut is seated.
+        approach = 1 - seated
+        # Imagination-only: reaching pays only an open hand or a grasp. The
         # full-task policy shut its gripper at once and a closed hand beside the
         # handle (which cannot grasp it) was paid like an open one.
-        ready = torch.maximum(self._open(s1), grasped)
+        ready = torch.maximum(self._open(s1), holding)
         distance = (self.physical_grasp(s1, c) - handle).norm(dim=-1)
         relative = _apply_inverse(peg_quat, nut - peg)
         # acos has an infinite derivative at 1 (a level nut); stay just inside.
@@ -283,8 +261,8 @@ class SquareMDP(RigidObjectMDP):
         # Imagination-only shaping. The native alignment and insertion terms are
         # 3 cm Gaussians, flat at the ~12 cm start of a carry, so pull the nut
         # toward the nearer of the above-peg and seated poses (descending onto
-        # the peg never lowers it) while it is held by the handle or threaded,
-        # not when shoved across the table.
+        # the peg never lowers it) while it is held or threaded, not when shoved
+        # across the table.
         above_target = peg + quat_apply(
             peg_quat, constant(peg, (0.0, 0.0, _ABOVE_PEG)).expand_as(peg)
         )
@@ -303,20 +281,19 @@ class SquareMDP(RigidObjectMDP):
             * approach
             * ready,
             # Imagination-only: holding stops paying once the nut is on the peg
-            # (natively once seated). Pushing a threaded nut down by its handle
-            # tilts and jams it; released, it slides down and seats.
-            "handle_grasp": grasped * valid * (1 - threaded),
-            "alignment": alignment * grasped * valid * (1 - threaded),
-            "insertion": insertion * threaded * grasp_seen * valid,
+            # (natively once seated). Pushing a held, threaded nut down tilts and
+            # jams it; released, it slides down and seats.
+            "grasp": holding * (1 - threaded),
+            "alignment": alignment * holding * (1 - threaded),
+            "insertion": insertion * threaded,
             "release": candidate,
-            "invalid_grasp": invalid,
             "success": self._success_term(s, s1, c),
             **self._costs(s, a, s1),
         }
         reward = sum(self.weights[name] * value for name, value in values.items())
         # A threaded nut counts as carried; otherwise the grasp's derivative applies.
-        carried = threaded + (1 - threaded) * grasped
-        reward = (reward + self.carry_weight * carry * carried * valid) * self.dt
+        carried = threaded + (1 - threaded) * holding
+        reward = (reward + self.carry_weight * carry * carried) * self.dt
         # Imagination-only release shaping on the raw gripper command, whose
         # straight-through derivative acts directly (through the world model's
         # finger prediction, trained only at the two binary targets, it was too
@@ -326,7 +303,7 @@ class SquareMDP(RigidObjectMDP):
         # held nut away from the peg (not threaded, centre beyond release_radius
         # of the axis) costs early_release_penalty; keeping the gripper closed
         # while the nut is threaded costs peg_hold_cost per second.
-        held, _ = self.grasp_status(s, c)
+        held = self.holding(s, c)
         nut0, nut_quat0, _, _ = self._frames(s, c)
         on_peg = threaded_geometry(
             nut0, nut_quat0, peg, peg_quat, axial_tolerance=self.criteria.max_penetration
@@ -336,21 +313,20 @@ class SquareMDP(RigidObjectMDP):
         early = held.detach() * (1 - on_peg) * (1 - over_peg) * self._commands_open(a)
         reward = reward - self.early_release_penalty * early
         reward = reward - self.peg_hold_cost * on_peg * self._commands_closed(a) * self.dt
-        done = 1 - (1 - values["success"]) * (1 - invalid) * (1 - self._timeout(s1))
+        done = 1 - (1 - values["success"]) * (1 - self._timeout(s1))
         return reward, done
 
     def task_contract(self):
         return {
-            "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, both fingers' collision boxes (finger_boxes: per finger the pad within 2 cm of the grasp point and the rest, link6 axes, posed by the arm joints and finger openings, bounded axis-aligned in the nut frame) at least release_clearance from every nut box (release proxy, straight-through), grasp_seen and not invalid; no support-force, penetration or contact test",
+            "imagined_success": "native threaded geometry with seated height and tilt, nut speeds below stable thresholds, both fingers' collision boxes (finger_boxes: per finger the pad within 2 cm of the grasp point and the rest, link6 axes, posed by the arm joints and finger openings, bounded axis-aligned in the nut frame) at least release_clearance from every nut box (release proxy, straight-through); no grasp history, support-force, penetration or contact test",
             "finger_boxes": [
                 [list(map(list, box)) for box in bands] for bands in self.finger_boxes
             ],
             "release_clearance": self.release_clearance,
-            "imagined_grasp": "grasp point in the nut frame inside the exposed handle (legal) or over the ring (wrong), both fingers within grip_band (the legal grasp straight-through in the band); replaces force-bearing finger contact classification",
-            "process_flags": "grasp_seen and invalid captured from the native success term, then latched analytically",
-            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the handle is grasped or the nut threaded; reaching also pays while grasped, pays only an open hand (both fingers past grip_band) or a legal grasp, and adds a far term 1 - tanh(distance / far_reaching_scale); handle_grasp and alignment gated off once threaded; imagination only",
+            "imagined_grasp": "grasp point in the nut frame inside a nut box widened by contact_tolerance across the slab and by the slab half-height along its normal, both fingers within grip_band (straight-through in the band); replaces force-bearing contact of both fingers with the nut anywhere",
+            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the nut is grasped or threaded; reaching toward the handle also pays while grasped, pays only an open hand (both fingers past grip_band) or a grasp, and adds a far term 1 - tanh(distance / far_reaching_scale); grasp and alignment gated off once threaded; imagination only",
             "carry_weight": self.carry_weight,
-            "imagined_early_release": "early_release_penalty for commanding open while the handle is grasped, the nut is not threaded and its centre is beyond release_radius of the peg axis; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
+            "imagined_early_release": "early_release_penalty for commanding open while the nut is grasped, not threaded and its centre is beyond release_radius of the peg axis; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
             "early_release_penalty": self.early_release_penalty,
             "release_radius": self.release_radius,
             "imagined_peg_release": "peg_hold_cost per second for commanding closed while the nut is threaded; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
@@ -387,11 +363,10 @@ class SquareAdapter(RigidObjectAdapter):
             "action_rate",
             "joint_vel",
             "reaching",
-            "handle_grasp",
+            "grasp",
             "alignment",
             "insertion",
             "release",
-            "invalid_grasp",
             "success",
         }
     )
@@ -420,12 +395,3 @@ class SquareAdapter(RigidObjectAdapter):
 
     def task_bodies(self):
         return ["nut/nut", "peg/peg"]
-
-    def process_state(self):
-        return (("grasp_seen", 1), ("invalid", 1))
-
-    def capture_extra(self):
-        return {
-            "grasp_seen": self.success.grasp_seen.float()[:, None],
-            "invalid": self.success.invalid.float()[:, None],
-        }

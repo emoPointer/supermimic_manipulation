@@ -41,7 +41,7 @@ reset) through a read-only hook; it never replaces the simulator or the controll
 | Part | Content |
 | --- | --- |
 | Physical state (predicted) | Arm and finger joint positions and velocities, object position, rotation (first two matrix columns) and linear/angular velocity, plus task extras (Drawer: slide position and velocity) |
-| Analytic state (not predicted) | Previous action, episode clock, success counter and task process flags (Square: `grasp_seen`, `invalid`; Drawer: the full physical-sequence milestones) |
+| Analytic state (not predicted) | Previous action, episode clock, success counter and task process flags (Drawer: the full physical-sequence milestones) |
 | Context (constant per episode) | Base and target poses, gravity, randomized masses, inertias, friction and joint parameters |
 
 A world whose physics diverged is terminated by the task; its transition is stored with the
@@ -61,7 +61,7 @@ increments (28-D, 30-D for Drawer); rotation increments are SO(3) tangent vector
 | --- | --- | --- | --- | --- |
 | `box_in_bin` | 40 | 142 | 195 | rollout state + context + actor history |
 | `lemon` | 40 | 145 | 195 | same |
-| `square` | 42 | 145 | 195 | same |
+| `square` | 40 | 145 | 195 | same |
 | `mug_hang` | 40 | 229 | 210 | same |
 | `drawer` | 56 | 161 | 300 | same |
 
@@ -84,7 +84,7 @@ the reduced state, so each task replaces them with geometric surrogates:
 | --- | --- |
 | `box_in_bin` | Native placement geometry; speeds below 0.03 m/s and 0.5 rad/s (native 0.01 and 0.1); both fingers opened past 0.028 m |
 | `lemon` | Native centre XY and height thresholds; height at most `contact_margin` (0.01 m) above the resting height as the contact proxy; both fingers opened past 0.023 m |
-| `square` | Native threaded/height/tilt geometry; handle versus ring grasp from the grasp point in the nut frame and a closed-on-object finger band, carried as `grasp_seen`/`invalid` flags; released when both fingers' collision boxes clear every nut box by `release_clearance` (1 mm); looser speeds |
+| `square` | Native threaded/height/tilt geometry; released when both fingers' collision boxes clear every nut box by `release_clearance` (1 mm); looser speeds. The grasp the shaping terms need is the grasp point inside a nut box with both fingers in a closed-on-object band |
 | `mug_hang` | Native tree-frame envelope and handle-on-bar geometry; looser speed limit; both fingers opened past 0.015 m |
 | `drawer` | Native physical-sequence update rules; pod grasp from grasp-point distance (`grasp_radius` 0.03 m) and finger band; push contact from the grasp point at the front panel; native final candidate |
 
@@ -100,13 +100,13 @@ BoxInBin, Lemon and MugHang add one imagination-only shaping term: once the obje
 placed, reaching stops paying and `release_weight` (0.2) × the finger opening fraction from
 the held width to the release opening is added, so holding on stops being rewarded. Square
 and Drawer already have native release terms; for Square, reaching keeps paying while the
-handle is grasped (natively it stops, so hovering an open gripper at the handle paid more than
+nut is grasped (natively it stops, so hovering an open gripper at the handle paid more than
 holding it) until the nut is seated, and holding stops paying once the nut is threaded (below). MugHang's native threading term vanishes
 while the handle is misaligned with the bar, so its imagination also adds a long-range pull of
 the handle toward the hanging target, `carry_weight` (0.2) × exp(−distance / 1 m). Square's
 alignment and insertion terms are 3 cm Gaussians, so its imagination likewise pulls the nut toward
-the nearer of an above-peg pose and the seated pose while the handle is grasped or the nut
-threaded. Drawer's
+the nearer of an above-peg pose and the seated pose while the nut is grasped or threaded.
+Drawer's
 native progress restarts at every stage (lift, place, close), so completing a stage would lower
 the reward; its imagined progress adds the number of completed stages instead, and its
 closing-stage reaching target sits 2 cm in front of the panel (natively on it), since a hand left
@@ -143,8 +143,8 @@ target improved the smooth terms.
   table everywhere else. Commanding open on a held nut away from the peg (not threaded, centre
   beyond `release_radius`, 1 cm, of the axis) costs `early_release_penalty` (2); commanding
   closed while the nut is threaded costs `peg_hold_cost` (2 per second); and holding stops
-  paying once the nut is threaded (natively once seated), since pushing a threaded nut down by
-  its handle tilts and jams it, while released it slides down and seats.
+  paying once the nut is threaded (natively once seated), since pushing a held, threaded nut
+  down tilts and jams it, while released it slides down and seats.
 - Square's release proxy is geometric: each finger's collision boxes (its pad within 2 cm of
   the grasp point and the rest of the finger), posed by the arm joints and its opening, must
   clear every nut box by `release_clearance` (1 mm). Native release is

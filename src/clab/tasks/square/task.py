@@ -1,4 +1,4 @@
-"""Square: thread a square nut onto its peg by the exposed handle and release it."""
+"""Square: thread a square nut onto its peg and release it."""
 
 from clab.tasks.base import ManipulationTask
 

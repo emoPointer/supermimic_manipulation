@@ -381,7 +381,6 @@ def collect(
     }
     cfg.rewards = {}
     cfg.terminations.pop("success")
-    cfg.terminations.pop("invalid_grasp")
     cfg.auto_reset = False
     cfg.episode_length_s = max(
         cfg.episode_length_s, (settle_steps + 2 * hold_steps + descent_steps + 2) * control_dt

@@ -18,9 +18,9 @@ class ResetFromBank(rigid_resets.RigidResetFromBank):
             if len(completed):
                 outcome = env.termination_manager.get_term_cfg("success").func
                 for name, value in (
-                    ("handle_grasp", outcome.grasp_seen),
+                    ("grasp", outcome.grasp_seen),
+                    ("handle_grasp", outcome.handle_grasp_seen),
                     ("threaded", outcome.threaded_seen),
-                    ("invalid_grasp", outcome.invalid),
                 ):
                     prefix = f"Episode_Diagnostics/{name}"
                     env.extras["log"][f"{prefix}_episodes"] = len(completed)

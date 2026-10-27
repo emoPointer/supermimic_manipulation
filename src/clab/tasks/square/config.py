@@ -47,16 +47,6 @@ def _contact_sensors():
                 entity="robot",
             ),
         ),
-        (
-            "left_handle_contact",
-            ContactMatch(mode="body", pattern=DEFAULT_ROBOT.finger_bodies[0], entity="robot"),
-            ContactMatch(mode="geom", pattern="nut_collision_4", entity="nut"),
-        ),
-        (
-            "right_handle_contact",
-            ContactMatch(mode="body", pattern=DEFAULT_ROBOT.finger_bodies[1], entity="robot"),
-            ContactMatch(mode="geom", pattern="nut_collision_4", entity="nut"),
-        ),
         ("nut_peg_contact", nut, peg),
         ("nut_table_contact", nut, table),
         ("nut_robot_contact", nut, robot),
@@ -219,7 +209,7 @@ def make_env_cfg(*, play: bool = False, reset_bank: str | Path | None = None):
             "reaching": RewardTermCfg(
                 func=mdp.reaching_reward, weight=0.2, params={"distance_scale": 0.05}
             ),
-            "handle_grasp": RewardTermCfg(func=mdp.handle_grasp_reward, weight=0.1),
+            "grasp": RewardTermCfg(func=mdp.grasp_reward, weight=0.1),
             "alignment": RewardTermCfg(
                 func=mdp.alignment_reward,
                 weight=0.1,
@@ -229,9 +219,6 @@ def make_env_cfg(*, play: bool = False, reset_bank: str | Path | None = None):
                 func=mdp.insertion_reward, weight=0.2, params={"distance_scale": 0.03}
             ),
             "release": RewardTermCfg(func=mdp.release_reward, weight=0.1),
-            "invalid_grasp": RewardTermCfg(
-                func=mdp.invalid_grasp_penalty, weight=-2.0 / DEFAULT_ROBOT.control_dt
-            ),
             "success": RewardTermCfg(
                 func=mdp.success_reward, weight=10.0 / DEFAULT_ROBOT.control_dt
             ),
@@ -243,7 +230,6 @@ def make_env_cfg(*, play: bool = False, reset_bank: str | Path | None = None):
             "success": TerminationTermCfg(
                 func=mdp.StableSuccess, params={"criteria": asdict(AssemblyCriteria())}
             ),
-            "invalid_grasp": TerminationTermCfg(func=mdp.invalid_grasp),
         },
         sim=SimulationCfg(
             nconmax=256,

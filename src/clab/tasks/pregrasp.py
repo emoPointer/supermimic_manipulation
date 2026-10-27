@@ -67,23 +67,23 @@ class SquarePregrasp:
 
     def configure(self, cfg):
         cfg.terminations.pop("success")
-        cfg.terminations.pop("invalid_grasp")
 
     def touching(self, env):
         return _contact(env, "nut_robot_contact") | _contact(env, "robot_peg_contact")
 
     def wrong(self, env):
-        # A finger crossing the ring while the gripper opens: natively an invalid grasp.
+        # Both fingers bearing on the ring (or ring and handle) while the gripper opens.
         return self.mdp.handle_grasp_status(env, self.criteria)[1]
 
     def above(self, grip, obj_pos, obj_quat, config):
-        from .square.supermimic import _HANDLE_CENTRE, _HANDLE_HALF, _RING_OUTER
+        from .square.props import NUT_BOXES
 
+        (centre, half), ring_outer = NUT_BOXES[4], max(p[0] + h[0] for p, h in NUT_BOXES[:4])
         local = quat_apply(quat_inverse(obj_quat), grip - obj_pos)
         return (
-            (local[:, 0] >= _RING_OUTER)
-            & (local[:, 0] <= _HANDLE_CENTRE[0] + _HANDLE_HALF[0])
-            & (local[:, 1].abs() <= _HANDLE_HALF[1] + config.lateral + 0.002)
+            (local[:, 0] >= ring_outer)
+            & (local[:, 0] <= centre[0] + half[0])
+            & (local[:, 1].abs() <= half[1] + config.lateral + 0.002)
             & (grip[:, 2] - obj_pos[:, 2] >= config.rise_range[0] / 2)
         )
 

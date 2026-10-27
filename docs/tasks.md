@@ -70,16 +70,17 @@ exclude other robot links touching the lemon.
 
 ## Square (`square`)
 
-Grasp the square nut by its protruding handle and thread it onto the fixed peg.
+Grasp the square nut and thread it onto the fixed peg. Any grasp counts; reaching guides
+the hand to the protruding handle, which leaves the hole free for the peg.
 
 | Item | Contract |
 | --- | --- |
 | Props | Free nut (five box geoms keeping the hole and handle); peg with base is a mocap body |
 | Horizon | 16 s |
 | Observations | actor 195; critic 153 |
-| Rewards | `reaching` 0.2, `handle_grasp` 0.1, `alignment` 0.1, `insertion` 0.2, `release` 0.1, the shared action/joint costs, `success` +10, `invalid_grasp` −2 |
-| Success | Peg threaded through the hole; nut seated at peg-local Z = −0.02 m (±2 mm) with tilt ≤ 5°; base support ≥ 0.05 N; robot fully released; speeds ≤ 0.01 m/s and 0.1 rad/s; object contact penetration ≤ 1 mm; a legal handle grasp observed earlier in the episode (the grasped categories start from a verified legal handle grasp, which counts); held 0.5 s |
-| Failure | Grasping the ring body (or a mixed handle/ring grasp) with both fingers ends the episode with −2 |
+| Rewards | `reaching` 0.2 (to the handle), `grasp` 0.1 (both fingers bearing on the nut, anywhere), `alignment` 0.1, `insertion` 0.2, `release` 0.1, the shared action/joint costs, `success` +10 |
+| Success | Peg threaded through the hole; nut seated at peg-local Z = −0.02 m (±2 mm) with tilt ≤ 5°; base support ≥ 0.05 N; robot fully released; speeds ≤ 0.01 m/s and 0.1 rad/s; object contact penetration ≤ 1 mm; held 0.5 s |
+| Failure | None besides the time limit; the nut may be grasped anywhere (the grasped reset categories hold its handle) |
 | Reset types | `NutRestingEEAnywhere`, `NutRestingHandleGrasped`, `NutAirborneHandleGrasped`, `NutPartiallyInsertedHandleGrasped`, `NutRestingEEPregrasp` (open hand 1–6 cm above the handle of a resting nut, derived from `NutRestingHandleGrasped`; see below); with `--insertion-per-stage` the last category mixes `near_peg` (held 3–10 cm beside the peg, above its top), `above_peg` and `threaded` starts, an intermediate curriculum between the far carries and insertion |
 | Bank frame | Environment-world poses |
 | Reset placement | Nut X [0.235, 0.295], Y [−0.090, −0.010], yaw [135°, 225°]; peg X [0.235, 0.295], Y [0.050, 0.110], yaw ±45°; footprints at least 3 cm apart in Y |

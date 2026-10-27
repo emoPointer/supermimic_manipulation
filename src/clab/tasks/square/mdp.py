@@ -1,4 +1,4 @@
-"""Handle-only Square assembly: physical seating, release and stable success.
+"""Square assembly: physical seating, release and stable success; any grasp of the nut.
 
 The old source position predicate is deliberately not the active success rule.
 Contact rules are measured at control boundaries, not every physics substep.
@@ -23,7 +23,7 @@ from .props import (
     PEG_HALF_WIDTH,
     handle_contact_bounds,
 )
-from .settings import INHERITED_HANDLE_GRASP, AssemblyCriteria
+from .settings import AssemblyCriteria
 from .variants import DEFAULT_ROBOT
 
 
@@ -90,15 +90,22 @@ def classify_finger_contacts(data, nut_pos, nut_quat, criteria):
     return touching, legal
 
 
-def handle_grasp_status(env, criteria):
+def grasp_status(env, criteria):
+    """Both fingers bear on the nut anywhere, and both bear only on the exposed handle."""
     nut_pos, nut_quat = pose(env, "nut")
-    left, left_legal = classify_finger_contacts(
+    left, left_handle = classify_finger_contacts(
         env.scene["left_grasp_contact"].data, nut_pos, nut_quat, criteria
     )
-    right, right_legal = classify_finger_contacts(
+    right, right_handle = classify_finger_contacts(
         env.scene["right_grasp_contact"].data, nut_pos, nut_quat, criteria
     )
-    return left_legal & right_legal, left & right & ~(left_legal & right_legal)
+    return left & right, left_handle & right_handle
+
+
+def handle_grasp_status(env, criteria):
+    """Reset collection, whose grasped rows hold the handle: handle grasp, any other grasp."""
+    grasped, handle = grasp_status(env, criteria)
+    return handle, grasped & ~handle
 
 
 def seating_geometry(nut_pos, nut_quat, peg_pos, peg_quat, criteria):
@@ -122,60 +129,51 @@ def seating_geometry(nut_pos, nut_quat, peg_pos, peg_quat, criteria):
 
 
 class StableSuccess(ManagerTermBase):
+    """Seated, supported, at rest and released for stable_seconds, however it was grasped.
+
+    The per-episode grasp, handle-grasp and threading flags are diagnostics only.
+    """
+
+    flags = (
+        "grasp_seen",
+        "handle_grasp_seen",
+        "threaded_seen",
+        "grasped",
+        "threaded",
+        "seated",
+        "candidate",
+    )
+
     def __init__(self, cfg, env):
         super().__init__(env)
         self.criteria = AssemblyCriteria(**cfg.params["criteria"])
         self.counter = torch.zeros(env.num_envs, dtype=torch.int32, device=env.device)
         self.required_steps = math.ceil(self.criteria.stable_seconds / env.step_dt - 1e-9)
-        self.inherited_grasp = torch.tensor(INHERITED_HANDLE_GRASP, device=env.device)
-        for name in (
-            "grasp_seen",
-            "threaded_seen",
-            "invalid",
-            "grasped",
-            "threaded",
-            "seated",
-            "candidate",
-        ):
+        for name in self.flags:
             setattr(self, name, torch.zeros(env.num_envs, dtype=torch.bool, device=env.device))
 
     def reset(self, env_ids=None):
         indices = env_ids if env_ids is not None else slice(None)
         self.counter[indices] = 0
-        for name in (
-            "grasp_seen",
-            "threaded_seen",
-            "invalid",
-            "grasped",
-            "threaded",
-            "seated",
-            "candidate",
-        ):
+        for name in self.flags:
             getattr(self, name)[indices] = False
-        # A grasped category starts in a collector-verified legal handle grasp.
-        # Contacts are first checked after one control step, when an opening
-        # gripper has already left the handle, so credit the initial grasp here.
-        # The reset event has already sampled this episode's category.
-        if "reset_from_bank" in self._env.event_manager.active_terms.get("reset", []):
-            event = self._env.event_manager.get_term_cfg("reset_from_bank").func
-            self.grasp_seen[indices] = self.inherited_grasp[event.task_id[indices]]
 
     def __call__(self, env, *, criteria):
         del criteria  # Validated, immutable copy from the recorded term config.
-        self.grasped[:], wrong = handle_grasp_status(env, self.criteria)
-        self.invalid |= wrong
-        self.grasp_seen |= self.grasped & ~self.invalid
+        self.grasped[:], handle = grasp_status(env, self.criteria)
+        self.grasp_seen |= self.grasped
+        self.handle_grasp_seen |= handle
         self.threaded[:] = threaded_geometry(
             *pose(env, "nut"), *pose(env, "peg"), axial_tolerance=self.criteria.max_penetration
         )
-        self.threaded_seen |= self.threaded & self.grasp_seen & ~self.invalid
+        self.threaded_seen |= self.threaded
         nut_pos, nut_quat = pose(env, "nut")
         peg_pos, peg_quat = pose(env, "peg")
         base = env.scene["nut_base_support"].data
         peg_normal = quat_apply(peg_quat, constant(peg_pos, (0.0, 0.0, 1.0)).expand_as(peg_pos))
         support = (base.force * peg_normal[:, None]).sum(-1).abs().sum(-1)
         supported = (base.found > 0).any(-1) & (support >= self.criteria.support_force_min)
-        safe = torch.ones_like(self.grasp_seen)
+        safe = torch.ones_like(self.seated)
         for name in ("nut_peg_contact", "nut_table_contact", "nut_robot_contact"):
             data = env.scene[name].data
             safe &= ((data.found == 0) | (data.dist >= -self.criteria.max_penetration)).all(-1)
@@ -187,18 +185,14 @@ class StableSuccess(ManagerTermBase):
             nut.root_link_ang_vel_w.norm(dim=-1) <= self.criteria.angular_speed_max
         )
         released = ~contact_found(env, "nut_robot_contact")
-        self.candidate[:] = self.seated & stable & released & self.grasp_seen & ~self.invalid
+        self.candidate[:] = self.seated & stable & released
         self.counter[:] = torch.where(self.candidate, self.counter + 1, 0)
         return self.counter >= self.required_steps
 
 
 def progress(env):
-    """Read the task-owned state updated by success before rewards/failures."""
+    """Read the task-owned state updated by success before rewards."""
     return env.termination_manager.get_term_cfg("success").func
-
-
-def invalid_grasp(env):
-    return progress(env).invalid
 
 
 def reaching_reward(env, distance_scale):
@@ -209,12 +203,12 @@ def reaching_reward(env, distance_scale):
     )
     handle = nut_pos + quat_apply(nut_quat, constant(nut_pos, NUT_GRASP_POINT).expand_as(nut_pos))
     state = progress(env)
-    approach = ~state.grasped & ~state.invalid & ~(state.seated & state.grasp_seen)
+    approach = ~state.grasped & ~state.seated
     return (1.0 - torch.tanh((grasp - handle).norm(dim=-1) / distance_scale)) * approach
 
 
-def handle_grasp_reward(env):
-    return progress(env).grasped.float() * ~progress(env).invalid
+def grasp_reward(env):
+    return progress(env).grasped.float()
 
 
 def alignment_reward(env, distance_scale, tilt_scale):
@@ -227,7 +221,7 @@ def alignment_reward(env, distance_scale, tilt_scale):
     alignment = torch.exp(
         -(relative[:, :2].norm(dim=-1) / distance_scale).square() - (tilt / tilt_scale).square()
     )
-    return alignment * progress(env).grasped * ~progress(env).invalid
+    return alignment * progress(env).grasped
 
 
 def insertion_reward(env, distance_scale):
@@ -238,17 +232,11 @@ def insertion_reward(env, distance_scale):
     return (
         torch.exp(-((nut_pos - target).norm(dim=-1) / distance_scale).square())
         * progress(env).threaded
-        * progress(env).grasp_seen
-        * ~progress(env).invalid
     )
 
 
 def release_reward(env):
     return progress(env).candidate.float()
-
-
-def invalid_grasp_penalty(env):
-    return env.termination_manager.get_term("invalid_grasp").float()
 
 
 def success_reward(env):
