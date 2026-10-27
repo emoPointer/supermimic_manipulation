@@ -16,6 +16,10 @@ class LemonTask(ManipulationTask):
     reset_class = ResetFromBank
     make_env_cfg = staticmethod(make_env_cfg)
     supermimic_adapter = "LemonAdapter"
+    # PPO's 24576 worlds do not fit the environment's capacities; measured at most
+    # 2.5 contacts per world, 28 rows (rollouts at 4096 worlds), with a threefold margin
+    # (nconmax at least the initial model's 10 contacts, which mujoco_warp requires).
+    ppo_capacity = (16, 96)
 
 
 TASK = LemonTask()

@@ -76,7 +76,12 @@ Runs RSL-RL PPO on the same environment, observations, reset bank and native rew
 go to `logs/rsl_rl/<experiment>/<timestamp>_<run-name>/`; `--gpu-ids` trains on several GPUs.
 `--reward imagined` trains instead on the reward SuperMimic optimizes: the task's imagined
 reward (with its imagination-only shaping, see [supermimic.md](supermimic.md)) evaluated on
-each real transition, so both methods optimize the same function.
+each real transition, so both methods optimize the same function. PPO allocates each task's
+`ppo_capacity` (average contacts per world, constraint rows per world), about three times the
+largest use measured in rollouts, since 24576 worlds do not fit the environment's capacities
+(MugHang needs more than 80 GB even so; train it with `--num-envs 16384`); physics overflows
+are counted (`Train/physics_overflow_world_steps`) and training stops when
+more than 1% of the worlds overflow at once.
 
 ## 3. Evaluation
 

@@ -16,6 +16,9 @@ class SquareTask(ManipulationTask):
     reset_class = ResetFromBank
     make_env_cfg = staticmethod(make_env_cfg)
     supermimic_adapter = "SquareAdapter"
+    # PPO's 24576 worlds do not fit the environment's capacities; measured at most
+    # 17 contacts per world, 124 rows (rollouts at 4096 worlds), with a threefold margin.
+    ppo_capacity = (56, 384)
 
 
 TASK = SquareTask()

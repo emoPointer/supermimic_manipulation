@@ -19,17 +19,12 @@ import torch
 from clab.contracts import checkpoint_environment, validate_environment_contract
 from clab.logging.episode_metrics import aggregate_success_rates
 from clab.logging.metrics import MetricsLogger
+from clab.simulation import CONTACT_MATCH_OVERFLOW
 
 from .agent import SuperMimicAgent
 from .buffer import ReplayBuffer
 from .config import SuperMimicConfig
 from .networks import ACTOR_INPUT_NORMALIZATION
-
-# mujoco_warp OverflowType.CONTACT_MATCH: a contact sensor matched more contacts
-# than its storage. Extra matches are dropped (the sensor still reports a found
-# contact) and physics is unchanged. Every other overflow bit drops contacts or
-# constraints, so that world's physics is no longer trustworthy.
-CONTACT_MATCH_OVERFLOW = 1 << 6
 
 
 @dataclass(frozen=True, kw_only=True)

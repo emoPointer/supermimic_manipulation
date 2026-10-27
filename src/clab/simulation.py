@@ -16,6 +16,11 @@ from mjlab.sim.sim_data import TorchArray, WarpBridge, _contains_warp_arrays
 from clab.cuda_graphs import SegmentedGraph
 
 MODES = ("auto", "plain", "substeps")
+# mujoco_warp OverflowType.CONTACT_MATCH: a contact sensor matched more contacts
+# than its storage. Extra matches are dropped (the sensor still reports a found
+# contact) and physics is unchanged. Every other overflow bit drops contacts or
+# constraints, so that world's physics is no longer trustworthy.
+CONTACT_MATCH_OVERFLOW = 1 << 6
 # ManagerBasedRlEnv.step of mjlab 1.5.3, which _step_with_substep_graph mirrors.
 _MJLAB_STEP_SHA256 = "5608d76da560356fc8be7d95dd11a49c564c67eee0ad5520cee7e57b89ce6a14"
 
