@@ -145,6 +145,16 @@ target improved the smooth terms.
   closed while the nut is threaded costs `peg_hold_cost` (2 per second); and holding stops
   paying once the nut is threaded (natively once seated), since pushing a held, threaded nut
   down tilts and jams it, while released it slides down and seats.
+- Square also makes letting go over the peg pay. The any-grasp policy carried the nut over
+  the peg and hovered there, centre 9.2 cm above the peg's and 1 cm off its axis, until the
+  time limit, in every grasped start. Released there, 57% of nuts self-centred and seated, 86%
+  once centred on the axis, but letting go lost the grasp, alignment and carry terms at once
+  and the success came 0.5–1 s later. A nut in the drop zone (centre within `release_radius`
+  of the axis, between 5 mm above a nut resting on the peg top and 4 cm above the carry
+  target) counts as held for those terms; commanding open on a held nut there pays
+  `drop_release_bonus` (2 per second); and `centring_weight` (0.1) × exp(−(axis distance /
+  `release_radius`)²) pulls a held nut onto the axis, where the native 3 cm alignment
+  Gaussian barely pulls.
 - Square's release proxy is geometric: each finger's collision boxes (its pad within 2 cm of
   the grasp point and the rest of the finger), posed by the arm joints and its opening, must
   clear every nut box by `release_clearance` (1 mm). Native release is
@@ -166,7 +176,7 @@ These settings are recorded in `params/mdp.json` and can be overridden with
 `--adapter-option NAME=VALUE` (`stable_linear_speed`, `stable_angular_speed`,
 `release_opening`, `release_weight`, `success_gradient_scale`, `action_bound_weight`,
 `gripper_bound`, `gripper_margin`; Lemon also `contact_margin`, MugHang and Square
-also `carry_weight`, Square also `early_release_penalty`, `release_radius`, `peg_hold_cost` and `release_clearance`,
+also `carry_weight`, Square also `early_release_penalty`, `release_radius`, `peg_hold_cost`, `drop_release_bonus`, `centring_weight` and `release_clearance`,
 Drawer also `grasp_radius`, `outside_release_penalty` and `inside_hold_cost`). Real collection and evaluation always use the native reward
 and success.
 

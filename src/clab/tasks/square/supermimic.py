@@ -31,6 +31,10 @@ from .settings import AssemblyCriteria
 # Peg-local nut centre held above the peg top, mid-range of the collector's
 # above-peg clearance (0.015-0.040 m).
 _ABOVE_PEG = PEG_HALF_HEIGHT + NUT_HALF_HEIGHT + 0.025
+# Peg-local height band of the drop zone for the nut centre: above a nut resting on
+# the peg top (by 5 mm) and at most 4 cm above the carry target.
+_DROP_FLOOR = PEG_HALF_HEIGHT + NUT_HALF_HEIGHT + 0.005
+_DROP_CEILING = _ABOVE_PEG + 0.04
 # Finger collision boxes: the pad within 2 cm behind the grasp point (the tips reach
 # 1.3 cm past it) and the rest of the finger. One box for the whole finger was so
 # loose (its base is wide) that it rarely read a natively released seated nut as
@@ -67,6 +71,8 @@ class SquareMDP(RigidObjectMDP):
         early_release_penalty=2.0,
         release_radius=0.01,
         peg_hold_cost=2.0,
+        drop_release_bonus=2.0,
+        centring_weight=0.1,
         action_bound_weight=0.05,
         **kwargs,
     ):
@@ -76,14 +82,20 @@ class SquareMDP(RigidObjectMDP):
             ("early_release_penalty", early_release_penalty),
             ("release_radius", release_radius),
             ("peg_hold_cost", peg_hold_cost),
+            ("drop_release_bonus", drop_release_bonus),
+            ("centring_weight", centring_weight),
             ("release_clearance", release_clearance),
         ):
             if not 0 <= value < float("inf"):
                 raise ValueError(f"{name} must be finite and nonnegative")
+        if release_radius <= 0:
+            raise ValueError("release_radius must be positive")
         self.carry_weight = float(carry_weight)
         self.early_release_penalty = float(early_release_penalty)
         self.release_radius = float(release_radius)
         self.peg_hold_cost = float(peg_hold_cost)
+        self.drop_release_bonus = float(drop_release_bonus)
+        self.centring_weight = float(centring_weight)
         self.release_clearance = float(release_clearance)
         self.criteria = criteria
         self.reaching_scale = float(reaching_scale)
@@ -227,6 +239,13 @@ class SquareMDP(RigidObjectMDP):
     def _candidate(self, s, c):
         return self._seated(s, c) * self._stable(s) * self._hands_off(s, c)
 
+    def _drop_zone(self, relative):
+        """Nut centre (peg-local) within release_radius of the axis and in the drop band."""
+        axis = relative[:, :2].norm(dim=-1)
+        height = relative[:, 2]
+        inside = (axis < self.release_radius) & (height > _DROP_FLOOR) & (height < _DROP_CEILING)
+        return inside.to(relative.dtype)
+
     def reward(self, s, a, s1, c):
         nut, nut_quat, peg, peg_quat = self._frames(s1, c)
         holding = self.holding(s1, c)
@@ -269,6 +288,16 @@ class SquareMDP(RigidObjectMDP):
         carry = torch.exp(
             -torch.minimum((nut - above_target).norm(dim=-1), (nut - seated_target).norm(dim=-1))
         )
+        # Imagination-only drop zone. Released there the nut self-centres onto the
+        # peg: from the hover the any-grasp policy settled at (centre 9.2 cm over the
+        # peg's, 1 cm off its axis) 57% of releases succeeded, 86% once centred. Yet
+        # letting go lost the grasp, alignment and carry terms at once while the
+        # success came 0.5-1 s later, so the policy hovered there to the time limit.
+        # A nut falling in the zone counts as held for those terms.
+        kept = torch.maximum(holding, self._drop_zone(relative) * (1 - threaded))
+        # Imagination-only: the native 3 cm alignment Gaussian barely pulls at the
+        # 1 cm hover offset; a release_radius-wide one centres the nut further.
+        centring = torch.exp(-(relative[:, :2].norm(dim=-1) / self.release_radius).square())
         candidate = self._candidate(s1, c)
         values = {
             # Imagination-only far term: the native 5 cm tanh is flat (derivative
@@ -283,8 +312,8 @@ class SquareMDP(RigidObjectMDP):
             # Imagination-only: holding stops paying once the nut is on the peg
             # (natively once seated). Pushing a held, threaded nut down tilts and
             # jams it; released, it slides down and seats.
-            "grasp": holding * (1 - threaded),
-            "alignment": alignment * holding * (1 - threaded),
+            "grasp": kept * (1 - threaded),
+            "alignment": alignment * kept * (1 - threaded),
             "insertion": insertion * threaded,
             "release": candidate,
             "success": self._success_term(s, s1, c),
@@ -292,8 +321,10 @@ class SquareMDP(RigidObjectMDP):
         }
         reward = sum(self.weights[name] * value for name, value in values.items())
         # A threaded nut counts as carried; otherwise the grasp's derivative applies.
-        carried = threaded + (1 - threaded) * holding
-        reward = (reward + self.carry_weight * carry * carried) * self.dt
+        carried = threaded + (1 - threaded) * kept
+        shaping = self.carry_weight * carry * carried
+        shaping = shaping + self.centring_weight * centring * kept * (1 - threaded)
+        reward = (reward + shaping) * self.dt
         # Imagination-only release shaping on the raw gripper command, whose
         # straight-through derivative acts directly (through the world model's
         # finger prediction, trained only at the two binary targets, it was too
@@ -302,17 +333,20 @@ class SquareMDP(RigidObjectMDP):
         # showed that the same reflex drops it on the table elsewhere. Opening a
         # held nut away from the peg (not threaded, centre beyond release_radius
         # of the axis) costs early_release_penalty; keeping the gripper closed
-        # while the nut is threaded costs peg_hold_cost per second.
+        # while the nut is threaded costs peg_hold_cost per second; commanding open
+        # on a held nut in the drop zone pays drop_release_bonus per second.
         held = self.holding(s, c)
         nut0, nut_quat0, _, _ = self._frames(s, c)
         on_peg = threaded_geometry(
             nut0, nut_quat0, peg, peg_quat, axial_tolerance=self.criteria.max_penetration
         ).to(s.dtype)
-        axis = _apply_inverse(peg_quat, nut0 - peg)[:, :2].norm(dim=-1)
-        over_peg = (axis < self.release_radius).to(s.dtype)
+        relative0 = _apply_inverse(peg_quat, nut0 - peg)
+        over_peg = (relative0[:, :2].norm(dim=-1) < self.release_radius).to(s.dtype)
         early = held.detach() * (1 - on_peg) * (1 - over_peg) * self._commands_open(a)
         reward = reward - self.early_release_penalty * early
         reward = reward - self.peg_hold_cost * on_peg * self._commands_closed(a) * self.dt
+        drop = held.detach() * self._drop_zone(relative0) * self._commands_open(a)
+        reward = reward + self.drop_release_bonus * drop * self.dt
         done = 1 - (1 - values["success"]) * (1 - self._timeout(s1))
         return reward, done
 
@@ -324,8 +358,12 @@ class SquareMDP(RigidObjectMDP):
             ],
             "release_clearance": self.release_clearance,
             "imagined_grasp": "grasp point in the nut frame inside a nut box widened by contact_tolerance across the slab and by the slab half-height along its normal, both fingers within grip_band (straight-through in the band); replaces force-bearing contact of both fingers with the nut anywhere",
-            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the nut is grasped or threaded; reaching toward the handle also pays while grasped, pays only an open hand (both fingers past grip_band) or a grasp, and adds a far term 1 - tanh(distance / far_reaching_scale); grasp and alignment gated off once threaded; imagination only",
+            "imagined_shaping": "carry_weight * exp(-distance to the nearer of the above-peg and seated poses / 1 m) added while the nut is grasped or threaded; reaching toward the handle also pays while grasped, pays only an open hand (both fingers past grip_band) or a grasp, and adds a far term 1 - tanh(distance / far_reaching_scale); grasp and alignment gated off once threaded; a nut in the drop zone counts as grasped for the grasp, alignment and carry terms; centring_weight * exp(-(axis distance / release_radius)^2) added while grasped or in the drop zone and not threaded; imagination only",
+            "imagined_drop_zone": "nut centre within release_radius of the peg axis, between 5 mm above a nut resting on the peg top and 4 cm above the carry target (peg-local)",
             "carry_weight": self.carry_weight,
+            "centring_weight": self.centring_weight,
+            "imagined_drop_release": "drop_release_bonus per second for commanding open while the nut is grasped in the drop zone; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
+            "drop_release_bonus": self.drop_release_bonus,
             "imagined_early_release": "early_release_penalty for commanding open while the nut is grasped, not threaded and its centre is beyond release_radius of the peg axis; native decision forward, hinge derivative backward on the raw gripper command; imagination only",
             "early_release_penalty": self.early_release_penalty,
             "release_radius": self.release_radius,
