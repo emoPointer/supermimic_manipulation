@@ -268,16 +268,22 @@ class DrawerMDP(RigidObjectMDP):
         target = torch.where((stage < 2)[:, None], self.obj(s1, "position"), panel)
         distance = (grip - target).norm(dim=-1)
         reaching = 1 - torch.tanh(10 * distance)
-        # Imagination-only: before the pod is released, reaching pays only an open
-        # hand or a grasp, plus a far term (the native 10 cm tanh is flat at the
-        # ~0.5 m full-task start). The full-task policy shut its gripper at once and
-        # a closed hand beside the pod (which cannot grasp it) was paid like an open one.
+        # Imagination-only: before the pod is released, reaching is averaged with a
+        # far term (the native 10 cm tanh is flat at the ~0.5 m full-task start) and,
+        # until the grasp is confirmed, pays only an open hand or a grasp: the
+        # full-task policy shut its gripper at once and a closed hand beside the pod
+        # (which cannot grasp it) was paid like an open one.
         grasped1, _ = self.contacts(s1, c)
         fingers = self.state.get(s1, "robot_q")[:, 6:8]
         opened = self._gate(fingers - self.grip_band[1], self.release_temperature).prod(-1)
-        ready = torch.maximum(opened, grasped1)
+        seen = torch.maximum(self._field(s1, "grasp_confirmed"), (stage >= 1).to(s1.dtype))
+        ready = seen + (1 - seen) * torch.maximum(opened, grasped1)
         far = 1 - torch.tanh(distance / self.far_reaching_scale)
-        reaching = torch.where(stage < 2, (reaching + far) * ready, reaching)
+        # Imagination-only stage credit, as for progress: the release ends reaching
+        # for the held pod (~1) and the closing stage's reach starts ~0.1 from the
+        # panel, so releasing inside the drawer lowered the reward and the held pod
+        # was carried away from it. Count the completed reach.
+        reaching = torch.where(stage < 2, (reaching + far) / 2 * ready, 1 + reaching)
         lift = ((height - self._field(s1, "initial_pod_z")) / 0.04).clamp(0, 1)
         place_target = torch.stack(
             (slide, torch.zeros_like(slide), torch.full_like(slide, 0.03)), -1
@@ -338,7 +344,7 @@ class DrawerMDP(RigidObjectMDP):
             "process_fields": "stage, prefix, accomplished, references, counters and flags captured from the native sequence, then advanced analytically",
             "imagined_progress_shaping": "completed stages plus the native stage progress, so progress never drops when a stage completes; imagination only",
             "imagined_closing_reach": "closing-stage reaching target 2 cm in front of the panel's outer face (natively on the face); imagination only",
-            "imagined_ready_reach": "before the closing stage, reaching adds 1 - tanh(distance / far_reaching_scale) and pays only an open hand (both fingers past grip_band) or a pod grasp; imagination only",
+            "imagined_ready_reach": "before the closing stage, reaching averages the native term with 1 - tanh(distance / far_reaching_scale) and, until grasp_confirmed or the lift stage completes, pays only an open hand (both fingers past grip_band) or a pod grasp; in the closing and final stages reaching is 1 plus the native term (the completed reach counted, like progress); imagination only",
             "far_reaching_scale": self.far_reaching_scale,
         }
 

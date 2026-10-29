@@ -110,15 +110,20 @@ Drawer's
 native progress restarts at every stage (lift, place, close), so completing a stage would lower
 the reward; its imagined progress adds the number of completed stages instead, and its
 closing-stage reaching target sits 2 cm in front of the panel (natively on it), since a hand left
-inside the drawer pushed it only part-way before jamming against the housing.
+inside the drawer pushed it only part-way before jamming against the housing. Releasing the pod
+likewise ends reaching for the held pod (about 1) while the closing-stage reach starts near 0.1,
+so the held pod was carried away from the drawer; the closing and final stages' imagined reaching
+adds 1 for the completed reach.
 
 In Square and Drawer the full-task policy closed its gripper on the first step and never
 opened it again: a closed hand beside the object, which cannot grasp it, was paid the same
 reaching reward as an open one. Their imagined reaching therefore pays only an open hand (both
-fingers past the grip band) or a grasp; Drawer applies this before the closing stage, where
-pushing with a closed hand is fine. Their native reaching tanh (5 cm for Square, 10 cm for
-Drawer) is flat at the ~0.5 m full-task start, so their imagination adds a far term
-1 − tanh(distance / `far_reaching_scale`, 0.5 m) toward the handle or pod.
+fingers past the grip band) or a grasp. Drawer applies this only until the pod grasp is first
+confirmed or the lift completed: gating the held carry on the grasp made every slip cost
+reaching too, and the grasped starts held the pod aloft without carrying it. Their native
+reaching tanh (5 cm for Square, 10 cm for Drawer) is flat at the ~0.5 m full-task start, so
+their imagination adds a far term 1 − tanh(distance / `far_reaching_scale`, 0.5 m) toward the
+handle or pod; Drawer averages the two, keeping the native range [0, 1].
 
 Square and Drawer also make letting go visible to the actor. Without this, every grasped start
 category ended with the gripper opened on the first step: the grasp tests and Drawer's failure
