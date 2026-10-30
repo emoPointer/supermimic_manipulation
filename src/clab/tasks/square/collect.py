@@ -381,6 +381,10 @@ def collect(
     }
     cfg.rewards = {}
     cfg.terminations.pop("success")
+    # Without autoreset a diverged candidate stays non-finite; the hold rejects it.
+    cfg.terminations.pop("physics_divergence")
+    for group in cfg.observations.values():
+        group.nan_policy = "sanitize"
     cfg.auto_reset = False
     cfg.episode_length_s = max(
         cfg.episode_length_s, (settle_steps + 2 * hold_steps + descent_steps + 2) * control_dt
