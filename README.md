@@ -35,8 +35,8 @@ baseline, and a complete-episode evaluator.
 Each clip shows two episodes of a trained policy. The arm starts at its home pose (all joints
 at zero) and the object and target come from a held-out test bank. The policy only sees
 low-dimensional state; the camera is for viewing. From the home pose the Square policy
-succeeds in 89% of 64 episodes and its clip shows the first two; the Drawer policy succeeds
-in 53%, and its clip shows the first two successes, which took six tries, at 2× speed.
+succeeds in 94% of 64 episodes and the Drawer policy in 91%; each clip shows the first two
+episodes, Drawer's at 2× speed.
 
 ## Results
 
@@ -50,30 +50,32 @@ reset category. No episode was filtered.
 | `lemon` | 4,000 | 1.8 h | **100.0%** | 100 / 100 / 100 / 100 |
 | `box_in_bin` | 4,000 | 1.9 h | **94.9%** | 97 / 91 / 95 / 97 |
 | `mug_hang` | 4,000 | 2.8 h | **96.9%** | 94 / 98 / 95 / 100 |
-| `square` | 18,000 | 17.5 h | **96.6%** | 98 / 95 / 95 / 98 / 95 |
-| `drawer` | 6,000 | 4.5 h | **77.2%** | 50 / 80 / 86 / 92 / 75 / 97 / 61 |
+| `square` | 16,000 | 10.5 h | **95.0%** | 95 / 98 / 91 / 97 / 94 |
+| `drawer` | 4,000 | 3.4 h | **90.2%** | 81 / 97 / 95 / 98 / 77 / 100 / 83 |
 
 - Lemon, BoxInBin and MugHang use the 4,000-iteration checkpoints released with the `main`
   branch. Square and Drawer use, for the run in the clip, the checkpoint with the best
-  training-bank success (32 episodes per category, every 2,000 iterations). The second seeds
-  reached 78.1% (Square, 18,000 iterations) and 68.1% (Drawer, 8,000).
-- Drawer's success varies strongly between checkpoints: 59, 77, 22 and 61% at 4,000, 6,000,
-  8,000 and 10,000 iterations for the run above.
-- Square trained 10,000 iterations and was resumed for 10,000 more with the cosine
-  learning-rate schedule stretched to 20,000 iterations, so the rate restarted at about half
-  its initial value; its time is the sum of both parts.
+  training-bank success (32 episodes per category, every 2,000 iterations; ties go to the
+  earlier one). The second seeds reached 93.8% (Square, 14,000 iterations) and 75.9%
+  (Drawer, 8,000).
+- Drawer's success can vary strongly between checkpoints: the second seed scored 78, 24, 76
+  and 69% at 4,000, 6,000, 8,000 and 10,000 iterations (the run above: 90, 90, 85 and 88%).
+- Square trains from scratch for 20,000 iterations with the cosine learning-rate schedule
+  spread over all of them. With the default 10,000-iteration schedule the two seeds reached
+  67 and 68% at 10,000 iterations. The run above was stopped at 16,200 iterations, once every
+  category passed 90% on the training bank.
 - Training time is wall-clock time from launch to the checkpoint, including the first 1,000
-  world-model-only iterations, on one A100-SXM4-80GB. Runs shared their GPU with other jobs
-  (the two Square seeds shared one), so the times are upper bounds.
+  world-model-only iterations, on one A100-SXM4-80GB. Runs shared their GPU with other jobs,
+  so the times are upper bounds.
 - Category 0 is the full task (object on the table, gripper free). Later categories start
   part-way through it; the last Square and Drawer category is an open hand just above the
   object (see [Square and Drawer](#square-and-drawer)).
 
 **Data.** Each iteration collects 10,240 simulated transitions from 4,096 parallel worlds:
-41 M for the 4,000-iteration runs (about 24 days of simulated time at 20 Hz), 185 M for
-Square (107 days) and 62 M for Drawer (36 days). The policy is trained only through the
+41 M for the 4,000-iteration runs, Drawer's included (about 24 days of simulated time at
+20 Hz), and 164 M for Square (95 days). The policy is trained only through the
 world model: no policy-gradient (PPO) update is used. Training banks hold 10,000 start states
-per category (Square 9,999, Drawer 1,993), held-out banks 256 (Drawer 255).
+per category (Square 9,999, Drawer 1,993), held-out banks 256 (Square and Drawer 255).
 
 ## Tasks
 
@@ -140,40 +142,37 @@ the grasped starts let go at once. What they needed:
   opening a held pod away from the drawer and holding it once inside cost. Data collection,
   reported rewards and evaluation use the native task.
 
-To reproduce the two runs (Square seed 1, Drawer seed 0):
+To reproduce the two runs (Square seed 1, Drawer seed 1):
 
 ```bash
 # Reset banks: training (seed 42 by default) and held-out
 clab resets collect --task square --output banks/square_train.pt --split train \
   --per-type 9999 --insertion-per-stage 3333
 clab resets collect --task square --output banks/square_test.pt --split test \
-  --seed 7 --per-type 256
+  --seed 7 --per-type 255 --insertion-per-stage 85
 clab resets collect --task drawer --output banks/drawer_train.pt --split train --per-type 2000
 clab resets collect --task drawer --output banks/drawer_test.pt --split evaluation \
   --seed 7 --per-type 256
 
-# Square: 10,000 iterations, then 10,000 more with the schedule stretched to 20,000
+# Square: 20,000 iterations with the learning-rate schedule over all of them
 clab train supermimic --task square --reset-bank banks/square_train.pt \
   --output logs/supermimic/square_s1 --seed 1 \
-  --reset-start-fraction 0.25 --cuda-graph-mode substeps
-clab train supermimic --task square --reset-bank banks/square_train.pt \
-  --resume logs/supermimic/square_s1/model_010000.pt --iterations 10000 \
-  --learning-rate-decay-iterations 20000 --output logs/supermimic/square_s1_20k --seed 1 \
+  --iterations 20000 --learning-rate-decay-iterations 20000 \
   --reset-start-fraction 0.25 --cuda-graph-mode substeps
 
 # Drawer
 clab train supermimic --task drawer --reset-bank banks/drawer_train.pt \
-  --output logs/supermimic/drawer_s0 --seed 0 \
+  --output logs/supermimic/drawer_s1 --seed 1 \
   --reset-start-fraction 0.25 --cuda-graph-mode substeps
 
 # Held-out evaluation
 clab eval policy --task square --algorithm supermimic \
-  --checkpoint logs/supermimic/square_s1_20k/model_018000.pt \
+  --checkpoint logs/supermimic/square_s1/model_016000.pt \
   --reset-bank banks/square_test.pt --episodes-per-type 64 --num-envs 64 \
   --seeds 100000 --split-label held_out --cuda-graph-mode substeps \
   --output reports/square_heldout.json
 clab eval policy --task drawer --algorithm supermimic \
-  --checkpoint logs/supermimic/drawer_s0/model_006000.pt \
+  --checkpoint logs/supermimic/drawer_s1/model_004000.pt \
   --reset-bank banks/drawer_test.pt --episodes-per-type 64 --num-envs 64 \
   --seeds 100000 --split-label held_out --cuda-graph-mode substeps \
   --output reports/drawer_heldout.json
