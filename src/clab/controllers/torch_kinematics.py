@@ -8,6 +8,8 @@ rotations store the first two matrix columns.
 import torch
 import torch.nn.functional as F
 
+from clab.tensors import constant
+
 
 def quat_mul(a, b):
     aw, av = a[..., :1], a[..., 1:]
@@ -118,12 +120,12 @@ def serial_chain_fk(joints, links):
     orientation = torch.zeros((*joints.shape[:-1], 4), device=joints.device, dtype=joints.dtype)
     orientation[..., 0] = 1
     for index, link in enumerate(links):
-        origin = joints.new_tensor(link.position).expand_as(position)
-        rotation = joints.new_tensor(link.quaternion).expand_as(orientation)
+        origin = constant(joints, link.position).expand_as(position)
+        rotation = constant(joints, link.quaternion).expand_as(orientation)
         position = position + quat_apply(orientation, origin)
         orientation = quat_mul(orientation, rotation)
         half = joints[..., index : index + 1] / 2
-        axis = joints.new_tensor(link.axis)
+        axis = constant(joints, link.axis)
         relative = torch.cat((half.cos(), half.sin() * axis), -1)
         orientation = quat_mul(orientation, relative)
     return position, F.normalize(orientation, dim=-1)

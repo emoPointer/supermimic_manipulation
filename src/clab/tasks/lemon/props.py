@@ -13,6 +13,8 @@ import mujoco
 import numpy as np
 from mjlab.entity import EntityCfg
 
+from clab.tensors import constant
+
 # Source sampling sites, not the minimum/maximum mesh vertices.
 LEMON_BOTTOM_OFFSET = -0.0296
 PLATE_BOTTOM_OFFSET = -0.0060
@@ -185,7 +187,7 @@ def within_workspace(poses, corners):
         pose = poses[f"{name}_pose"]
         points = quat_apply(
             pose[:, None, 3:].expand(-1, 8, -1),
-            pose.new_tensor(vertices)[None].expand(len(pose), -1, -1),
+            constant(pose, vertices)[None].expand(len(pose), -1, -1),
         )
         points += pose[:, None, :3]
         inside = contains_bounds(points.amin(1), points.amax(1))

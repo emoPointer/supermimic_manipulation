@@ -1,6 +1,6 @@
 # Tasks
 
-All three tasks share one robot (a simulated ARX5 arm with a parallel gripper), one
+All five tasks share one robot (a simulated ARX5 arm with a parallel gripper), one
 workcell layout and one control timing: 20 Hz policy steps and 480 Hz `implicitfast`
 physics (24 substeps per action). Scenes use elliptic friction cones with `impratio=5`.
 Observation term order, dimensions, frames and units are checkpoint contracts: a checkpoint
@@ -29,7 +29,7 @@ loads only into an environment with the same saved contract.
   a one-off +10 (`success` weight `10 / control_dt`) and ends the episode. Termination alone
   never implies success; evaluation reads the explicit outcome.
 - **Rewards** share the names `reaching`, `success`, `action_magnitude`, `action_rate` and
-  `joint_vel`; task guidance terms are `placement` or `threading`.
+  `joint_vel`; task guidance terms are `placement`, `insertion`, `threading` or `progress`.
   Logged `Episode_Reward/*` values are episode sums divided by the maximum episode length.
 - **Reset categories** are sampled uniformly from the task's reset bank; every task's
   category 0 is the complete task, later categories start part-way through it.
@@ -68,6 +68,26 @@ Put an 80 g lemon on a fixed plate and release it.
 The success predicate is deliberately permissive: it has no speed threshold and does not
 exclude other robot links touching the lemon.
 
+## Square (`square`)
+
+Grasp the square nut and thread it onto the fixed peg. Any grasp counts; reaching guides
+the hand to the protruding handle, which leaves the hole free for the peg.
+
+| Item | Contract |
+| --- | --- |
+| Props | Free nut (five box geoms keeping the hole and handle); peg with base is a mocap body |
+| Horizon | 16 s |
+| Observations | actor 195; critic 153 |
+| Rewards | `reaching` 0.2 (to the handle), `grasp` 0.1 (both fingers bearing on the nut, anywhere), `alignment` 0.1, `insertion` 0.2, `release` 0.1, the shared action/joint costs, `success` +10 |
+| Success | Peg threaded through the hole; nut seated at peg-local Z = −0.02 m (±2 mm) with tilt ≤ 5°; base support ≥ 0.05 N; robot fully released; speeds ≤ 0.01 m/s and 0.1 rad/s; object contact penetration ≤ 1 mm; held 0.5 s |
+| Failure | None besides the time limit; the nut may be grasped anywhere (the grasped reset categories hold its handle) |
+| Reset types | `NutRestingEEAnywhere`, `NutRestingHandleGrasped`, `NutAirborneHandleGrasped`, `NutPartiallyInsertedHandleGrasped`, `NutRestingEEPregrasp` (open hand 1–6 cm above the handle of a resting nut, derived from `NutRestingHandleGrasped`; see below); with `--insertion-per-stage` the last category mixes `near_peg` (held 3–10 cm beside the peg, above its top), `above_peg` and `threaded` starts, an intermediate curriculum between the far carries and insertion |
+| Bank frame | Environment-world poses |
+| Reset placement | Nut X [0.235, 0.295], Y [−0.090, −0.010], yaw [135°, 225°]; peg X [0.235, 0.295], Y [0.050, 0.110], yaw ±45°; footprints at least 3 cm apart in Y |
+
+Guidance terms are gated by the grasp/insertion stage; the gated guidance totals at most
+0.4 per second.
+
 ## MugHang (`mug_hang`)
 
 Hang a mug on a fixed tree by threading its handle onto the bar.
@@ -87,3 +107,61 @@ Handle engagement: the handle anchor (mug-local `(0, 0.03, 0)`) lies within 0.01
 bar segment (tree-local `(0.015, 0, 0.055)` to `(0.095, 0, 0.055)`), projects inside the
 segment ±5 mm, and the bar direction has a dot product ≥ 0.75 with the mug's +X axis. The
 observed hanging target is the bar midpoint `(0.055, 0, 0.055)`.
+
+## Drawer (`drawer`)
+
+Pick up a coffee pod, put it into an already opened drawer, and push the drawer closed.
+
+| Item | Contract |
+| --- | --- |
+| Props | Free pod; fixed housing with a passive drawer slide (range [0, 0.14] m) that starts open at 0.13 m |
+| Horizon | 60 s |
+| Observations | actor 265 and critic 74, including the 12-D stage-masked physical-sequence observation |
+| Rewards | `reaching` 0.2, `progress` 0.2, the shared action/joint costs, `success` +10 |
+| Process | Stable two-finger grasp for 0.3 s and lift ≥ 0.04 m → release inside the drawer for 0.3 s → contact push closing the slide by ≥ 0.015 m; nothing ends the episode early (below) |
+| Success | Process complete, slide q < 0.03 m, pod inside the drawer and not grasped; held 0.5 s |
+| Reset types | See below |
+| Bank frame | Environment-local world (positions minus the environment origin) |
+| Reset placement | Pod X [0.075, 0.205], Y [0.090, 0.250], yaw ±18°; housing X [0.325, 0.335], Y [−0.080, −0.040], yaw [165°, 195°] |
+
+No process failure ends an episode. A grasp lost before the lift starts the grasp again,
+a pod released anywhere may still come to rest in the drawer or be grasped again, and a
+pod grasped again or out of the drawer while closing returns the sequence to the release
+stage. Released from the `PodHeldAboveOpenDrawer` pose, 12 cm above the drawer bottom, the
+pod lands inside the drawer in all of 256 trials; the earlier rules counted that as a
+release outside the drawer (centre not yet below 0.06 m) and ended the episode, and the
+transport categories learned to hold the pod beside the drawer until the time limit.
+Reset collection keeps those strict rules (`PhysicalSequence(strict=True)`), so every
+bank row still comes from one unbroken process.
+
+Drawer is a long-horizon task, so its reset bank holds six snapshots of one complete
+physical trajectory, plus a pre-grasp state derived from the grasped snapshot (see below).
+Later stages shorten the credit-assignment distance; the process milestones already achieved
+in the trajectory (grasp/lift, inside release) are restored as inherited flags, never counted
+as new accomplishments.
+
+| Category | Snapshot | Inherited grasp/lift, release |
+| --- | --- | --- |
+| `DrawerOpenedPodOnTable` | Drawer open, pod on the table, hand free | no, no |
+| `DrawerOpenedPodGraspedOnTable` | Pod grasped, still on the table | no, no |
+| `DrawerOpenedPodAirborneGrasped` | Pod grasped and lifted | yes, no |
+| `PodHeldAboveOpenDrawer` | Pod held above the open drawer | yes, no |
+| `PodReleasedInOpenDrawer` | Pod released inside the drawer | yes, yes |
+| `DrawerHalfClosed` | Drawer pushed to 0.07 m | yes, yes |
+| `DrawerOpenedPodPregrasp` | Open hand 1–6 cm above the resting pod (derived) | no, no |
+
+**Pre-grasp category (Square, Drawer).** Without it nothing bridged the full task (gripper
+free, often half a metre away) and the first grasped category: the full-task policy never
+opened its hand at the object, so the critic never valued doing so. `clab.tasks.pregrasp`
+derives each row physically from a grasped-on-table row: open the gripper, re-aim at the same
+object-frame grasp point (opening can shift the object), rise straight up, move to a random
+offset (up to ±1 cm sideways, 1–6 cm up) and hold 0.5 s. A row is kept only if the object
+then rests stably and level, no finger touches it (or, in Square, the ring or the peg; in
+Drawer, the drawer, whose slide must not move) during the hold, both fingers are open and the
+grasp point is above the handle or pod. The saved row is the actual end state. Drawer derives
+one row per trajectory and drops a trajectory from every category if all attempts fail, so
+the categories stay paired; Square draws fresh offsets until the category has as many rows
+as its source. The category is last, so the collected categories keep their indices.
+
+Drawer uses convex-decomposed finger collisions so the finger grooves are not filled by a
+single convex hull; the other tasks use one convex hull per finger.

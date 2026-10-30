@@ -9,6 +9,7 @@ import torch
 
 from clab.controllers.torch_kinematics import six_to_matrix
 from clab.tasks.supermimic import RigidObjectAdapter, RigidObjectMDP
+from clab.tensors import constant
 
 from .settings import BIN_INNER_HALF_EXTENTS, BOX_HALF_EXTENTS
 
@@ -33,7 +34,7 @@ class BoxInBinMDP(RigidObjectMDP):
         delta = box - bin_pos
         x = cy * delta[:, 0] + sy * delta[:, 1]
         y = -sy * delta[:, 0] + cy * delta[:, 1]
-        half = s.new_tensor(BOX_HALF_EXTENTS)
+        half = constant(s, BOX_HALF_EXTENTS)
         ext_x = ((cy[:, None] * matrix[:, 0] + sy[:, None] * matrix[:, 1]).abs() * half).sum(-1)
         ext_y = ((-sy[:, None] * matrix[:, 0] + cy[:, None] * matrix[:, 1]).abs() * half).sum(-1)
         ext_z = (matrix[:, 2].abs() * half).sum(-1)
@@ -69,7 +70,7 @@ class BoxInBinMDP(RigidObjectMDP):
     def reward(self, s, a, s1, c):
         box = self.obj(s1, "position")
         reaching = 1 - torch.tanh((self.physical_grasp(s1, c) - box).norm(dim=-1))
-        goal = self.target(c, "position") + s.new_tensor((0.0, 0.0, 0.0405))
+        goal = self.target(c, "position") + constant(s, (0.0, 0.0, 0.0405))
         placement = torch.exp(-(box - goal).norm(dim=-1))
         # Imagination-only shaping (not a native term): once the box is placed,
         # reward finger opening instead of grasp proximity, so holding stops

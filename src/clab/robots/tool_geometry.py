@@ -63,6 +63,73 @@ def tool_geometry_points(model, finger_open: float, *, robot) -> np.ndarray:
     return result
 
 
+def finger_boxes(model, *, robot, depths) -> tuple:
+    """Finger collision boxes in link6 axes, relative to the physical grasp point.
+
+    Per finger body, one ``(lower, upper, direction)`` per depth band at zero
+    opening: the box bounding its collision-mesh vertices whose depth behind the
+    grasp point along the grasp offset (the approach direction) lies in the band,
+    and the box displacement per metre of that finger's prismatic opening. Band k
+    spans ``(depths[k - 1], depths[k]]``; the first also holds the tips past the
+    grasp point. Only a fresh local MjData is changed; the supplied model is
+    never modified.
+    """
+    depths = tuple(float(depth) for depth in depths)
+    if (
+        not depths
+        or not all(math.isfinite(depth) and depth > 0 for depth in depths)
+        or any(a >= b for a, b in zip(depths, depths[1:], strict=False))
+    ):
+        raise ValueError("Finger box depths must be finite, positive and increasing")
+    offset = np.asarray(robot.grasp_offset, dtype=float)
+    approach = offset / np.linalg.norm(offset)
+    wrist = model.body(f"robot/{robot.ee_body}").id
+    qids = [int(model.joint(f"robot/{name}").qposadr[0]) for name in robot.finger_joints]
+    data = mujoco.MjData(model)
+
+    def vertices(body, opening):
+        mujoco.mj_resetData(model, data)
+        data.qpos[qids] = opening
+        mujoco.mj_forward(model, data)
+        points = []
+        for geom in range(model.ngeom):
+            if int(model.geom_bodyid[geom]) != body or not (
+                model.geom_contype[geom] or model.geom_conaffinity[geom]
+            ):
+                continue
+            if model.geom_type[geom] != mujoco.mjtGeom.mjGEOM_MESH:
+                raise ValueError(f"Unsupported non-mesh finger geometry: {model.geom(geom).name}")
+            mesh = model.geom_dataid[geom]
+            start, count = model.mesh_vertadr[mesh], model.mesh_vertnum[mesh]
+            world = (
+                model.mesh_vert[start : start + count] @ data.geom_xmat[geom].reshape(3, 3).T
+                + data.geom_xpos[geom]
+            )
+            points.append((world - data.xpos[wrist]) @ data.xmat[wrist].reshape(3, 3) - offset)
+        if not points:
+            raise ValueError("A finger body has no collision mesh")
+        return np.concatenate(points)
+
+    fingers = []
+    for name in robot.finger_bodies:
+        body = model.body(f"robot/{name}").id
+        closed, opened = vertices(body, 0.0), vertices(body, 0.01)
+        # Prismatic travel translates every vertex alike.
+        direction = tuple(((opened - closed).mean(0) / 0.01).tolist())
+        depth = -(closed @ approach)
+        bands, start = [], -math.inf
+        for end in depths:
+            part = closed[(depth > start) & (depth <= end)]
+            if not len(part):
+                raise ValueError(
+                    f"No {name} collision geometry {start}-{end} m behind the grasp point"
+                )
+            bands.append((tuple(part.min(0).tolist()), tuple(part.max(0).tolist()), direction))
+            start = end
+        fingers.append(tuple(bands))
+    return tuple(fingers)
+
+
 def safe_rotation_fraction(
     points_l6: torch.Tensor,
     position_w: torch.Tensor,

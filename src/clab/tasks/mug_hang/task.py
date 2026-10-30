@@ -16,6 +16,9 @@ class MugHangTask(ManipulationTask):
     reset_class = ResetFromBank
     make_env_cfg = staticmethod(make_env_cfg)
     supermimic_adapter = "MugHangAdapter"
+    # PPO's 24576 worlds do not fit the environment's capacities; measured at most
+    # 61 contacts per world, 234 rows (rollouts at 4096 worlds), with a threefold margin.
+    ppo_capacity = (184, 704)
 
 
 TASK = MugHangTask()

@@ -15,7 +15,7 @@ from clab.contracts import (
     validate_environment_contract,
 )
 from clab.logging.episode_metrics import EpisodeLogger
-from clab.simulation import configure_cuda_graph
+from clab.simulation import CONTACT_MATCH_OVERFLOW, configure_cuda_graph
 
 
 def validate_resume_control(path: str, cfg) -> None:
@@ -44,16 +44,61 @@ class ClabPpoRunner(MjlabOnPolicyRunner):
         elif backend != "both":
             raise ValueError(f"Unsupported PPO logger: {backend}")
         graph_mode = train_cfg.pop("cuda_graph_mode", "auto")
+        reward_source = train_cfg.pop("reward_source", "native")
+        task_name = train_cfg.pop("task_name", "")
+        adapter = None
+        if reward_source == "imagined":
+            from clab.tasks.registry import load_task
+
+            adapter = load_task(task_name).make_supermimic_adapter(env.unwrapped)
+        elif reward_source != "native":
+            raise ValueError(f"Unsupported PPO reward source: {reward_source}")
         configure_cuda_graph(env.unwrapped, graph_mode)
-        if graph_mode == "plain":
+        if graph_mode in ("plain", "substeps"):
             env.reset()  # Discard the warmup state before PPO starts collecting.
         super().__init__(env, train_cfg, log_dir, device)
         # A world whose physics diverged is terminated and reset by the task;
         # its final reward is NaN and must not reach the PPO returns.
         step = self.env.step
+        clip = self.env.clip_actions
+        sim = env.unwrapped.sim
+        overflow_counts = {"physics": 0, "contact_match": 0}
 
         def finite_step(actions):
+            if adapter is not None:
+                state, context = adapter.read()
             obs, rewards, dones, extras = step(actions)
+            # As in SuperMimic: PPO's per-task capacities are smaller than the
+            # environment's, so count physics overflows (flags persist until a world
+            # resets) and stop when many worlds overflow at once.
+            overflow = sim.data.overflow
+            if bool((overflow != 0).any()):
+                physics = torch.bitwise_and(overflow, ~CONTACT_MATCH_OVERFLOW) != 0
+                overflowed = int(physics.sum())
+                if overflowed > max(1, overflow.numel() // 100):
+                    codes = sorted(set(overflow[physics].tolist()))
+                    raise RuntimeError(
+                        f"Physics capacity overflow in {overflowed} worlds (mujoco_warp "
+                        f"OverflowType bitmasks {codes}); raise the task's ppo_capacity"
+                    )
+                overflow_counts["physics"] += overflowed
+                overflow_counts["contact_match"] += int(((overflow != 0) & ~physics).sum())
+            if adapter is not None:
+                # The same equation SuperMimic optimizes, on the actual PRE state,
+                # issued action and pre-autoreset POST state of this step.
+                issued = actions if clip is None else torch.clamp(actions, -clip, clip)
+                native = rewards
+                rewards, _ = adapter.mdp.reward(state, issued, adapter.post_step(), context)
+                # Only steps that already carry episode logs: a record without the
+                # episode keys first would hide them from the upstream reduction.
+                if "log" in extras:
+                    extras["log"]["Reward/native_step_mean"] = torch.nan_to_num(native).mean()
+                    extras["log"]["Reward/imagined_step_mean"] = torch.nan_to_num(rewards).mean()
+            if "log" in extras:
+                for name, count in overflow_counts.items():
+                    extras["log"][f"Train/{name}_overflow_world_steps"] = torch.tensor(
+                        float(count), device=rewards.device
+                    )
             return obs, torch.nan_to_num(rewards, nan=0.0, posinf=0.0, neginf=0.0), dones, extras
 
         self.env.step = finite_step
@@ -97,6 +142,12 @@ class ClabPpoRunner(MjlabOnPolicyRunner):
                 else "cpu",
                 "logging_backend": backend,
                 "cuda_graph_mode": graph_mode,
+                "reward_source": reward_source,
+                "reward_function": (
+                    "task SuperMimic MDP reward(s, a, s1, c) on real transitions"
+                    if adapter is not None
+                    else "native reward manager"
+                ),
                 "finite_horizon": env.cfg.is_finite_horizon,
                 "timeout_bootstrap": not env.cfg.is_finite_horizon,
                 "resume_is_exact": False,

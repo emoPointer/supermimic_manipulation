@@ -90,6 +90,7 @@ def train(
     cuda_graph_mode: str = "auto",
     smoke: bool = False,
     adapter_options: dict | None = None,
+    full_task_resets: bool = False,
 ) -> dict:
     """Train until the iteration budget or SIGINT/SIGTERM; returns the completion report.
 
@@ -112,6 +113,12 @@ def train(
         cfg.sim.nconmax = nconmax
     if njmax is not None:
         cfg.sim.njmax = njmax
+    if full_task_resets:
+        # Ablation of the reset categories: every episode starts from category 0.
+        params = cfg.events["reset_from_bank"].params
+        if "reaching_only" not in params:
+            raise ValueError(f"{task.name} reset event has no full-task-only mode")
+        params["reaching_only"] = True
     dataset = task.bank_metadata(torch.load(bank, map_location="cpu", weights_only=True))
     if not bank_control_matches(dataset, cfg):
         raise ValueError(
@@ -145,6 +152,7 @@ def train(
         "dataset": dataset,
         "run": asdict(run),
         "imagination_overrides": adapter_options,
+        "full_task_resets": full_task_resets,
         # The last worlds are held out of world-model fitting; they still seed imagination.
         "world_model_validation_envs": round(run.validation_fraction * num_envs),
         "agent": asdict(algorithm),
@@ -225,8 +233,8 @@ def train(
             "reward_matches_native": runner.reward_matches_native,
             **runner.reward_comparison_metrics(),
             "native_observation_max_error": runner.max_observation_error,
-            "terminal_transitions": runner.terminal_transitions,
-            "diverged_transitions": runner.diverged_transitions,
+            "terminal_transitions": int(runner.terminal_transitions),
+            "diverged_transitions": int(runner.diverged_transitions),
             "contact_match_overflow_world_steps": runner.contact_match_overflow_world_steps,
             "physics_overflow_world_steps": runner.physics_overflow_world_steps,
             "replay_allocated_bytes": runner.buffer.allocated_nbytes,

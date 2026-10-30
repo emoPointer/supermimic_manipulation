@@ -12,9 +12,16 @@ class ClabPpoRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     logging_backend: Literal["both", "tensorboard"] = "both"
 
-    cuda_graph_mode: Literal["auto", "plain"] = "auto"
+    cuda_graph_mode: Literal["auto", "plain", "substeps"] = "auto"
 
     upload_model: bool = False
+
+    # "native": the task's reward manager. "imagined": the task's SuperMimic MDP
+    # reward on each real transition, the function SuperMimic optimizes in
+    # imagination (with its imagination-only shaping), for a like-for-like baseline.
+    reward_source: Literal["native", "imagined"] = "native"
+
+    task_name: str = ""
 
     logger: dict[str, str] = field(
         default_factory=lambda: {

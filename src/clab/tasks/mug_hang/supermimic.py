@@ -11,6 +11,7 @@ import torch
 
 from clab.controllers.torch_kinematics import quat_apply, quat_inverse, six_to_quat
 from clab.tasks.supermimic import RigidObjectAdapter, RigidObjectMDP
+from clab.tensors import constant
 
 from .props import (
     BRANCH_INNER,
@@ -50,14 +51,14 @@ class MugHangMDP(RigidObjectMDP):
         return mug, mug_quat, tree, tree_quat
 
     def _point(self, position, quaternion, local):
-        return position + quat_apply(quaternion, position.new_tensor(local).expand_as(position))
+        return position + quat_apply(quaternion, constant(position, local).expand_as(position))
 
     def _handle_geometry(self, mug, mug_quat, tree, tree_quat):
         """Native finite-segment anchor distance, projection and handle alignment."""
         inner = _apply_inverse(mug_quat, self._point(tree, tree_quat, BRANCH_INNER) - mug)
         outer = _apply_inverse(mug_quat, self._point(tree, tree_quat, BRANCH_OUTER) - mug)
         direction = (outer - inner) / BRANCH_LENGTH
-        anchor = mug.new_tensor(HANDLE_ANCHOR)
+        anchor = constant(mug, HANDLE_ANCHOR)
         projection = ((anchor - inner) * direction).sum(-1)
         closest = inner + projection.clamp(0, BRANCH_LENGTH)[:, None] * direction
         return (anchor - closest).norm(dim=-1), projection, direction[:, 0]

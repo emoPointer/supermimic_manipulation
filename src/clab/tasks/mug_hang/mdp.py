@@ -10,6 +10,7 @@ from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
 
 from clab.observations.state import pose
 from clab.tasks import rewards
+from clab.tensors import constant
 
 from .props import (
     BRANCH_INNER,
@@ -126,8 +127,8 @@ def handle_to_hang_target(env):
     """
     mug_pos, mug_quat = pose(env, "mug")
     tree_pos, tree_quat = pose(env, "tree")
-    handle = mug_pos + quat_apply(mug_quat, mug_pos.new_tensor(HANDLE_ANCHOR).expand_as(mug_pos))
-    target = tree_pos + quat_apply(tree_quat, tree_pos.new_tensor(HANG_TARGET).expand_as(tree_pos))
+    handle = mug_pos + quat_apply(mug_quat, constant(mug_pos, HANDLE_ANCHOR).expand_as(mug_pos))
+    target = tree_pos + quat_apply(tree_quat, constant(tree_pos, HANG_TARGET).expand_as(tree_pos))
     return quat_apply_inverse(tree_quat, target - handle)
 
 

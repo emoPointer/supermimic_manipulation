@@ -28,9 +28,16 @@ def ppo(argv: list[str], prog: str) -> None:
     parser.add_argument(
         "--resume", type=Path, help="Continue from LOG_ROOT/<experiment>/RUN/model_N.pt"
     )
-    parser.add_argument("--cuda-graph-mode", choices=("auto", "plain"), default="auto")
+    parser.add_argument("--cuda-graph-mode", choices=("auto", "plain", "substeps"), default="auto")
     parser.add_argument("--wandb-entity", help="Also log metrics to this Weights & Biases entity")
     parser.add_argument("--gpu-ids", type=int, nargs="+", default=[0])
+    parser.add_argument(
+        "--reward",
+        choices=("native", "imagined"),
+        default="native",
+        help="native: the task reward; imagined: SuperMimic's task MDP reward evaluated on "
+        "each real transition (the function SuperMimic optimizes)",
+    )
     args = parser.parse_args(argv)
     from clab.algorithms.ppo.train import train
 
@@ -49,6 +56,7 @@ def ppo(argv: list[str], prog: str) -> None:
         cuda_graph_mode=args.cuda_graph_mode,
         wandb_entity=args.wandb_entity,
         gpu_ids=tuple(args.gpu_ids),
+        reward_source=args.reward,
     )
 
 
@@ -71,7 +79,7 @@ def supermimic(argv: list[str], prog: str) -> None:
     parser.add_argument("--njmax", type=int)
     parser.add_argument("--resume", type=Path, help="Approximate continuation from a checkpoint")
     parser.add_argument("--logger", choices=("tensorboard", "none"), default="tensorboard")
-    parser.add_argument("--cuda-graph-mode", choices=("auto", "plain"), default="auto")
+    parser.add_argument("--cuda-graph-mode", choices=("auto", "plain", "substeps"), default="auto")
     parser.add_argument(
         "--smoke", action="store_true", help="Tiny networks and budgets; checks save and reload"
     )
@@ -83,6 +91,12 @@ def supermimic(argv: list[str], prog: str) -> None:
         help="Task adapter imagination setting (all tasks: stable_linear_speed, "
         "stable_angular_speed, release_opening, release_weight, success_gradient_scale; "
         "see docs/supermimic.md for task-specific settings)",
+    )
+    parser.add_argument(
+        "--full-task-resets",
+        action="store_true",
+        help="Start every episode from reset category 0, the full task (ablation of the "
+        "reset categories; evaluation still uses every category)",
     )
     for field, default in asdict(RunConfig()).items():
         _add_field(parser, field, default)
@@ -118,6 +132,7 @@ def supermimic(argv: list[str], prog: str) -> None:
         cuda_graph_mode=args.cuda_graph_mode,
         smoke=args.smoke,
         adapter_options=options,
+        full_task_resets=args.full_task_resets,
     )
 
 

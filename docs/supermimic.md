@@ -40,8 +40,8 @@ reset) through a read-only hook; it never replaces the simulator or the controll
 
 | Part | Content |
 | --- | --- |
-| Physical state (predicted) | Arm and finger joint positions and velocities, object position, rotation (first two matrix columns) and linear/angular velocity |
-| Analytic state (not predicted) | Previous action, episode clock and success counter |
+| Physical state (predicted) | Arm and finger joint positions and velocities, object position, rotation (first two matrix columns) and linear/angular velocity, plus task extras (Drawer: slide position and velocity) |
+| Analytic state (not predicted) | Previous action, episode clock, success counter and task process flags (Drawer: the full physical-sequence milestones) |
 | Context (constant per episode) | Base and target poses, gravity, randomized masses, inertias, friction and joint parameters |
 
 A world whose physics diverged is terminated by the task; its transition is stored with the
@@ -57,10 +57,17 @@ worlds overflow at once.
 
 The operational-space controller re-anchors at the current end-effector pose on every
 action, so it has no internal memory to model: the world model only needs the physical state
-of the arm and the object.
+of the arm and the object (and Drawer's slide).
 
-**Input** (180 for BoxInBin, 183 for Lemon, 267 for MugHang) is the concatenation of three
-parts.
+| Task | World-model input | Output | Rollout state | Context | Actor | Critic input |
+| --- | --- | --- | --- | --- | --- | --- |
+| `box_in_bin` | 180 | 28 | 40 | 142 | 195 | 377 |
+| `lemon` | 183 | 28 | 40 | 145 | 195 | 380 |
+| `square` | 183 | 28 | 40 | 145 | 195 | 380 |
+| `mug_hang` | 267 | 28 | 40 | 229 | 210 | 479 |
+| `drawer` | 201 | 30 | 55 | 161 | 265 | 468 |
+
+**Input** is the concatenation of three parts.
 
 | Part | Dims | Meaning |
 | --- | --- | --- |
@@ -69,53 +76,66 @@ parts.
 | `<object>_position` | 3 | Object position (m) in world axes, relative to the environment origin |
 | `<object>_rotation` | 6 | Object orientation as the first two columns of its rotation matrix (continuous, unlike quaternions or Euler angles) |
 | `<object>_velocity` | 6 | Object linear (m/s) and angular (rad/s) velocity in world axes |
-| Executed command | 7 | What the controller actually executes for the raw action: position offset (3, m) and rotation vector (3, rad) after the controller's clip, scaling and per-step norm bound, plus the commanded finger position (1, m: 0.002 closed, 0.044 open) |
-| Context | 142 / 145 / 229 | Constants of the episode, listed below |
+| `slide_q`, `slide_dq` | 1 + 1 | Drawer only: slide position (m) and velocity (m/s) |
+| Executed command | 7 | What the controller actually executes for the raw action: position offset (3, m) and rotation vector (3, rad) after the controller's clip, scaling and per-step norm bound, plus the commanded finger position (1, m: 0.002 closed, 0.044 open; binary forward, with a sigmoid straight-through gradient) |
+| Context | 142-229 | Constants of the episode, listed below |
 
 | Context field | Dims | Meaning |
 | --- | --- | --- |
 | `base_position`, `base_rotation` | 3 + 6 | Robot base pose |
-| `<target>_position`, `<target>_rotation` | 3 + 6 | Pose of the fixed target (bin, plate or tree) |
+| `<target>_position`, `<target>_rotation` | 3 + 6 | Pose of the fixed target (bin, plate, peg, tree or drawer housing) |
 | `origin_z` | 1 | Height of the environment origin |
 | `gravity` | 3 | Gravity vector |
-| `body_mass` | 12 | Randomized masses of the 9 robot bodies, the object, the target and the table |
-| `body_inertia` | 36 | Their principal inertias (3 each) |
-| `geom_friction` | 48 / 51 / 135 | Sliding, torsional and rolling friction (3 each) of the 16 / 17 / 45 collision geoms of robot, object, target and table (MugHang's mug has 32 collision pieces) |
+| `body_mass` | 12 (BoxInBin, Lemon, MugHang) | Randomized masses of the 9 robot bodies, the object, the target and the table |
+| `body_inertia` | 36 (BoxInBin, Lemon, MugHang) | Their principal inertias (3 each) |
+| `geom_friction` | 48 / 51 / 135 (BoxInBin / Lemon / MugHang) | Sliding, torsional and rolling friction (3 each) of the 16 / 17 / 45 collision geoms of robot, object, target and table (MugHang's mug has 32 collision pieces) |
 | `dof_armature`, `dof_damping`, `dof_frictionloss` | 8 each | Joint armature, damping and dry friction of the 8 robot joints |
 
+Square and Drawer have the same fields over their own bodies, collision geoms and joints.
 Feeding the actual randomized physical parameters lets one model cover the domain
 randomization of training without having to infer it from history.
 
 **Output** (28) is the normalized increment of the physical state over one 0.05 s control
-step: `robot_q` 8, `robot_dq` 8, object position 3, object rotation 3 and object velocity 6.
-The rotation increment is a world-axis rotation vector (the SO(3) tangent), `log(R_next
-R_prev⁻¹)`, integrated as `exp(δ) R_prev`; all other parts are added. Inputs and outputs are
-normalized with running means and standard deviations.
+step: `robot_q` 8, `robot_dq` 8, object position 3, object rotation 3 and object velocity 6
+(Drawer adds the slide, 30). The rotation increment is a world-axis rotation vector (the
+SO(3) tangent), `log(R_next R_prev⁻¹)`, integrated as `exp(δ) R_prev`; all other parts are
+added. Inputs and outputs are normalized with running means and standard deviations.
 
 **Analytic state** (9, not predicted) completes the 40-D rollout state: the previous raw
 action (7), the episode clock (1) and the success counter (1). They are advanced by rules,
-not learned.
+not learned. Drawer adds its 13 physical-sequence columns (55-D).
 
 | Network | Architecture | Parameters (BoxInBin) |
 | --- | --- | --- |
 | World model | MLP 5 × 2048, LayerNorm and SiLU, zero-initialized output layer | 17.2 M |
 | Actor | MLP 2048-1024-512-256, ELU; observation normalizer; no output squashing | 3.2 M |
-| Critic | MLP 256-128, ELU; input = rollout state + context + actor observation (377 / 380 / 479) | 0.13 M |
+| Critic | MLP 256-128, ELU; input = rollout state + context + actor observation (Drawer: without the 13 process columns) | 0.13 M |
 
 **Training loss.** Windows of 8 consecutive steps are rolled out open-loop: each prediction
 is fed back as the next input. At every step the error between the predicted and the real
-state (as a 28-D increment, with the rotation error as a rotation vector) is divided by the
+state (as an output increment, with the rotation error as a rotation vector) is divided by the
 output standard deviation, floored at 1e-3 (1e-2 for joint positions, joint velocities and
 object velocity), squared and averaged. Steps after an episode end, and transitions from a
 world whose physics diverged, are masked.
 
-The actor observation (195 = 39 × 5 for BoxInBin and Lemon, 210 = 42 × 5 for MugHang) holds
-five frames of: object pose in the target frame (6), previous action (7), joint positions
-(8), end-effector pose in the base frame (6), object pose in the end-effector frame (6) and
-target pose in the end-effector frame (6), poses as position plus axis-angle; MugHang adds
-the handle-to-hanging-point vector (3). In imagination these frames are rebuilt from the
-predicted state with differentiable forward kinematics and match the native observation to
-about 1e-6 on real states. The world model is a reduced surrogate, not an exact MuJoCo state.
+The actor observation (195 = 39 × 5 for BoxInBin, Lemon and Square, 210 = 42 × 5 for
+MugHang) holds five frames of: object pose in the target frame (6), previous action (7),
+joint positions (8), end-effector pose in the base frame (6), object pose in the
+end-effector frame (6) and target pose in the end-effector frame (6), poses as position plus
+axis-angle; MugHang adds the handle-to-hanging-point vector (3) and Drawer (265) the slide
+and its physical-sequence observation ([tasks.md](tasks.md)). In imagination these frames
+are rebuilt from the predicted state with differentiable forward kinematics and match the
+native observation to about 1e-6 on real states. The world model is a reduced surrogate,
+not an exact MuJoCo state.
+
+Drawer's actor and critic see its physical sequence only as the stage and the history the
+rest of the episode still depends on: each stage's references and counters during that stage
+(zero elsewhere) and the success flag. The reset prefix, the episode's
+accomplishments and the initial slide never change the outcome and are not observed, so a pod
+released in the drawer looks the same whether it was released in this episode or before a
+`PodReleasedInOpenDrawer` reset. With them observed, the critic valued a pod a
+`PodHeldAboveOpenDrawer` episode had just released at −1.8 and the same pod at that reset at
++6, and the transport categories never learned to release it in the drawer.
 
 ## Imagined reward and success
 
@@ -129,7 +149,9 @@ the reduced state, so each task replaces them with geometric surrogates:
 | --- | --- |
 | `box_in_bin` | Native placement geometry; speeds below 0.03 m/s and 0.5 rad/s (native 0.01 and 0.1); both fingers opened past 0.028 m |
 | `lemon` | Native centre XY and height thresholds; height at most `contact_margin` (0.01 m) above the resting height as the contact proxy; both fingers opened past 0.023 m |
+| `square` | Native threaded/height/tilt geometry; released when both fingers' collision boxes clear every nut box by `release_clearance` (1 mm); looser speeds. The grasp the shaping terms need is the grasp point inside a nut box with both fingers in a closed-on-object band |
 | `mug_hang` | Native tree-frame envelope and handle-on-bar geometry; looser speed limit; both fingers opened past 0.015 m |
+| `drawer` | Native physical-sequence update rules; pod grasp from grasp-point distance (`grasp_radius` 0.03 m) and finger band; push contact from the grasp point at the front panel; native final candidate |
 
 Common to all tasks:
 
@@ -139,23 +161,92 @@ Common to all tasks:
 - geometry, speed and success gates are hard in the forward pass and use sigmoid
   straight-through gradients backward.
 
-Two imagination-only shaping terms cover places where the native reward has no useful
-gradient:
+BoxInBin, Lemon and MugHang add one imagination-only shaping term: once the object is
+placed, reaching stops paying and `release_weight` (0.2) × the finger opening fraction from
+the held width to the release opening is added, so holding on stops being rewarded. Square
+and Drawer already have native release terms; for Square, reaching keeps paying while the
+nut is grasped (natively it stops, so hovering an open gripper at the handle paid more than
+holding it) until the nut is seated, and holding stops paying once the nut is threaded (below). MugHang's native threading term vanishes
+while the handle is misaligned with the bar, so its imagination also adds a long-range pull of
+the handle toward the hanging target, `carry_weight` (0.2) × exp(−distance / 1 m). Square's
+alignment and insertion terms are 3 cm Gaussians, so its imagination likewise pulls the nut toward
+the nearer of an above-peg pose and the seated pose while the nut is grasped or threaded.
+Drawer's
+native progress restarts at every stage (lift, place, close), so completing a stage would lower
+the reward; its imagined progress adds the number of completed stages instead, and its
+closing-stage reaching target sits 2 cm in front of the panel (natively on it), since a hand left
+inside the drawer pushed it only part-way before jamming against the housing. Releasing the pod
+likewise ends reaching for the held pod (about 1) while the closing-stage reach starts near 0.1,
+so the held pod was carried away from the drawer; the closing and final stages' imagined reaching
+adds 1 for the completed reach.
 
-- **Release.** Once the object is placed, reaching stops paying and `release_weight` (0.2) ×
-  the finger opening fraction from the held width to the release opening is added, so holding
-  on is never preferred to letting go.
-- **Carry (MugHang).** The native threading term vanishes while the handle is misaligned
-  with the bar, which is how every carry starts, so imagination also pulls the handle toward
-  the hanging target, `carry_weight` (0.2) × exp(−distance / 1 m).
+In Square and Drawer the full-task policy closed its gripper on the first step and never
+opened it again: a closed hand beside the object, which cannot grasp it, was paid the same
+reaching reward as an open one. Their imagined reaching therefore pays only an open hand (both
+fingers past the grip band) or a grasp. Drawer applies this only until the pod grasp is first
+confirmed or the lift completed: gating the held carry on the grasp made every slip cost
+reaching too, and the grasped starts held the pod aloft without carrying it. Their native
+reaching tanh (5 cm for Square, 10 cm for Drawer) is flat at the ~0.5 m full-task start, so
+their imagination adds a far term 1 − tanh(distance / `far_reaching_scale`, 0.5 m) toward the
+handle or pod; Drawer averages the two, keeping the native range [0, 1].
+
+Square and Drawer also make letting go visible to the actor. Without this, every grasped start
+category ended with the gripper opened on the first step: the grasp tests are hard, so their
+derivative is zero, while the dropped object falling toward its target improved the smooth
+terms.
+
+- Their grasp proxies are straight-through in the closed-on-object finger band, so the rewards
+  that need a grasp show that opening the gripper loses them.
+- That derivative reaches the gripper only through the world model's finger prediction, so
+  Drawer also shapes the raw command: opening a held pod costs `outside_release_penalty` (2)
+  in the lift stage and, in the release stage, unless the pod is over the drawer opening (the
+  inside footprint at any height), from where it drops into the drawer; keeping the gripper
+  closed once the pod is inside costs `inside_hold_cost` (2 per second). Without the
+  lift-stage cost the grasped-on-table starts learned to open at once and dropped the pod.
+  Drawer's imagined `done` is success or the time limit, as natively.
+- Square shapes the release on the raw gripper command, whose straight-through derivative
+  acts directly; through the world model's finger prediction, which is trained only at the two
+  binary targets, the derivative was too weak to change a decision. A nut over the peg drops
+  and self-centres, so the grasped starts taught "open at once", which drops the nut on the
+  table everywhere else. Commanding open on a held nut away from the peg (not threaded, centre
+  beyond `release_radius`, 1 cm, of the axis) costs `early_release_penalty` (2); commanding
+  closed while the nut is threaded costs `peg_hold_cost` (2 per second); and holding stops
+  paying once the nut is threaded (natively once seated), since pushing a held, threaded nut
+  down tilts and jams it, while released it slides down and seats.
+- Square also makes letting go over the peg pay. The any-grasp policy carried the nut over
+  the peg and hovered there, centre 9.2 cm above the peg's and 1 cm off its axis, until the
+  time limit, in every grasped start. Released there, 57% of nuts self-centred and seated, 86%
+  once centred on the axis, but letting go lost the grasp, alignment and carry terms at once
+  and the success came 0.5–1 s later. A nut in the drop zone (centre within `release_radius`
+  of the axis, between 5 mm above a nut resting on the peg top and 4 cm above the carry
+  target) counts as held for those terms; commanding open on a held nut there pays
+  `drop_release_bonus` (2 per second); and `centring_weight` (0.1) × exp(−(axis distance /
+  `release_radius`)²) pulls a held nut onto the axis, where the native 3 cm alignment
+  Gaussian barely pulls.
+- Square's release proxy is geometric: each finger's collision boxes (its pad within 2 cm of
+  the grasp point and the rest of the finger), posed by the arm joints and its opening, must
+  clear every nut box by `release_clearance` (1 mm). Native release is
+  the end of every nut-robot contact. The previous proxy, not both fingers inside the finger
+  band, counted any opened hand as released: in most stalled episodes the nut was seated but
+  one open finger still pressed on the ring (about 1.5 N), and imagination counted a success
+  the native test never did, so nothing taught the hand to move away.
+- These release costs use the native binary decision forward and a hinge derivative
+  backward: constant until the raw command is past the decision boundary by `gripper_margin`
+  (1), zero beyond. A sigmoid derivative vanishes on a saturated command (Square's reached
+  +12, later −5, and froze there); one that never vanishes kept driving correct decisions on,
+  to −7 against the action bound below, whose cost then dominated the imagined return, and the
+  policy drifted to wherever its own command was cheapest, away from the peg.
+- Both set `action_bound_weight` (0.05 per second; 0 elsewhere): a squared cost on the raw
+  gripper command beyond ±`gripper_bound` (3) and on raw pose axes beyond the controller's
+  input limit, where the clip has no derivative.
 
 These settings are recorded in `params/mdp.json` and can be overridden with
 `--adapter-option NAME=VALUE` (`stable_linear_speed`, `stable_angular_speed`,
-`release_opening`, `release_weight`, `success_gradient_scale`; Lemon also `contact_margin`,
-MugHang also `carry_weight`). The task model also accepts `action_bound_weight` (default 0),
-a squared imagination cost on raw commands beyond ±`gripper_bound` (gripper) and the
-controller's input limit (pose), where the binary gripper's sigmoid and the clip give no
-derivative. Real collection and evaluation always use the native reward and success.
+`release_opening`, `release_weight`, `success_gradient_scale`, `action_bound_weight`,
+`gripper_bound`, `gripper_margin`; Lemon also `contact_margin`, MugHang and Square
+also `carry_weight`, Square also `early_release_penalty`, `release_radius`, `peg_hold_cost`, `drop_release_bonus`, `centring_weight` and `release_clearance`,
+Drawer also `grasp_radius`, `outside_release_penalty` and `inside_hold_cost`). Real collection and evaluation always use the native reward
+and success.
 
 ## Options and diagnostics
 
@@ -168,6 +259,7 @@ derivative. Real collection and evaluation always use the native reward and succ
 | `--exploration-fraction F` | In the first worlds, occasionally flip the gripper command for several steps |
 | `--wm-ensemble-size K --uncertainty-penalty P` | Train K independent world models and penalize their disagreement in imagination |
 | `--policy-update-interval K` | Update actor/critic every K iterations after the world-model-only phase |
+| `--full-task-resets` | Start every training episode from reset category 0 (the full task) instead of all categories; an ablation of the reset categories |
 | `--reset-start-fraction F` | Draw a fraction F of imagination starts from episode-start (reset) rows instead of uniformly over replay |
 | `--no-compile-world-model`, `--no-compile-policy-update` | Disable `torch.compile` (slower; useful for debugging) |
 | `--smoke` | Tiny networks and budgets; checks saving, reloading and one more update |

@@ -19,17 +19,12 @@ import torch
 from clab.contracts import checkpoint_environment, validate_environment_contract
 from clab.logging.episode_metrics import aggregate_success_rates
 from clab.logging.metrics import MetricsLogger
+from clab.simulation import CONTACT_MATCH_OVERFLOW
 
 from .agent import SuperMimicAgent
 from .buffer import ReplayBuffer
 from .config import SuperMimicConfig
 from .networks import ACTOR_INPUT_NORMALIZATION
-
-# mujoco_warp OverflowType.CONTACT_MATCH: a contact sensor matched more contacts
-# than its storage. Extra matches are dropped (the sensor still reports a found
-# contact) and physics is unchanged. Every other overflow bit drops contacts or
-# constraints, so that world's physics is no longer trustworthy.
-CONTACT_MATCH_OVERFLOW = 1 << 6
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -70,6 +65,10 @@ class RunConfig:
     exploration_steps: int = 10
     # Actor/critic update every policy_update_interval iterations after WM-only.
     policy_update_interval: int = 1
+    # Real-transition diagnostics (native observation reconstruction, surrogate
+    # versus native reward and success predicates) run every diagnostic_interval
+    # vector steps. They only feed logs and each costs host-device synchronizations.
+    diagnostic_interval: int = 10
 
     def validate(self, algorithm: SuperMimicConfig) -> None:
         for name in ("compile_world_model", "compile_policy_update", "pin_replay"):
@@ -134,15 +133,27 @@ class RunConfig:
             raise ValueError("Require buffer_steps >= warmup_steps >= wm_window")
         if not math.isfinite(self.action_noise) or self.action_noise < 0:
             raise ValueError("action_noise must be finite and nonnegative")
+        if type(self.diagnostic_interval) is not int or self.diagnostic_interval < 1:
+            raise ValueError("diagnostic_interval must be a positive integer")
+
+
+def _tensors(value):
+    if isinstance(value, torch.Tensor):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _tensors(item)
+    elif isinstance(value, (tuple, list)):
+        for item in value:
+            yield from _tensors(item)
 
 
 def finite_tensors(value) -> bool:
-    if isinstance(value, torch.Tensor):
-        return bool(torch.isfinite(value).all())
-    if isinstance(value, dict):
-        return all(finite_tensors(item) for item in value.values())
-    if isinstance(value, (tuple, list)):
-        return all(finite_tensors(item) for item in value)
+    """All tensors in a nested value are finite; one synchronization per device."""
+    flags = {}
+    for tensor in _tensors(value):
+        flags.setdefault(tensor.device, []).append(torch.isfinite(tensor).all())
+    return all(bool(torch.stack(values).all()) for values in flags.values())
     return True
 
 
@@ -185,8 +196,9 @@ class SuperMimicRunner:
         # Optional task hook: per-step success predicates, independent of counters.
         self.candidate_counts = {"surrogate": 0, "native": 0, "surrogate_only": 0, "native_only": 0}
         self.max_observation_error = 0.0
-        self.terminal_transitions = 0
-        self.diverged_transitions = 0
+        # Device counters, read only when reported (no per-step synchronization).
+        self.terminal_transitions = torch.zeros((), dtype=torch.long, device=self.device)
+        self.diverged_transitions = torch.zeros((), dtype=torch.long, device=self.device)
         self.contact_match_overflow_world_steps = 0
         self.physics_overflow_world_steps = 0
 
@@ -263,8 +275,10 @@ class SuperMimicRunner:
         for index in range(steps):
             state, context = self.adapter.read()
             obs = self.observations["actor"].clone()
-            observation_error = self.adapter.validate_observation(state, context, obs)
-            self.max_observation_error = max(self.max_observation_error, observation_error)
+            diagnose = self.sim_steps % self.run_config.diagnostic_interval == 0
+            if diagnose:
+                observation_error = self.adapter.validate_observation(state, context, obs)
+                self.max_observation_error = max(self.max_observation_error, observation_error)
             action = self.agent.policy(obs)
             action = action + self.run_config.action_noise * torch.randn_like(action)
             action = self._explore(action)
@@ -296,7 +310,7 @@ class SuperMimicRunner:
             valid = finite & ~physics
             post = torch.where(valid[:, None], post, state)
             reward = torch.where(valid, reward, 0.0)
-            self.diverged_transitions += int((~finite).sum().item())
+            self.diverged_transitions += (~finite).sum()
             transition = {
                 "s": state,
                 "s1": post,
@@ -313,16 +327,17 @@ class SuperMimicRunner:
             # Compare task-owned analytic reward equations on actual simulator
             # POST states before reset. An explicitly declared imagination
             # surrogate may differ; native replay rewards and terminals stay intact.
-            reconstructed_reward, reconstructed_done = self.mdp.reward(
-                state,
-                action,
-                post,
-                context,
-            )
-            self._record_reward_comparison(
-                reconstructed_reward, reconstructed_done, reward, terminated | truncated
-            )
-            if hasattr(self.adapter, "candidate_comparison"):
+            if diagnose:
+                reconstructed_reward, reconstructed_done = self.mdp.reward(
+                    state,
+                    action,
+                    post,
+                    context,
+                )
+                self._record_reward_comparison(
+                    reconstructed_reward, reconstructed_done, reward, terminated | truncated
+                )
+            if diagnose and hasattr(self.adapter, "candidate_comparison"):
                 surrogate, native = self.adapter.candidate_comparison(post, context)
                 for key, value in (
                     ("surrogate", surrogate),
@@ -342,7 +357,7 @@ class SuperMimicRunner:
                         if key.startswith("Episode_Metrics/")
                     }
                 )
-            self.terminal_transitions += int((terminated | truncated).sum().item())
+            self.terminal_transitions += (terminated | truncated).sum()
             self.observations = observations
             self.sim_steps += 1
             self.real_transitions += self.env.num_envs
@@ -385,21 +400,26 @@ class SuperMimicRunner:
         """Per world group: terminated and completed episodes since the last log."""
         count = round(self.run_config.exploration_fraction * terminated.shape[0])
         if getattr(self, "episode_group_counts", None) is None:
-            self.episode_group_counts = {"policy": [0, 0], "exploration": [0, 0]}
+            self.episode_group_counts = {
+                name: torch.zeros(2, dtype=torch.long, device=terminated.device)
+                for name in ("policy", "exploration")
+            }
         done = terminated | truncated
         for name, rows in (("exploration", slice(0, count)), ("policy", slice(count, None))):
-            self.episode_group_counts[name][0] += int(terminated[rows].sum().item())
-            self.episode_group_counts[name][1] += int(done[rows].sum().item())
+            counts = self.episode_group_counts[name]
+            counts[0] += terminated[rows].sum()
+            counts[1] += done[rows].sum()
 
     def _episode_group_metrics(self) -> dict[str, float]:
         """Terminated-episode rates; for BoxInBin only success terminates (timeouts truncate)."""
         counts = getattr(self, "episode_group_counts", None) or {}
         result = {}
-        for name, (terminal, completed) in counts.items():
+        for name, values in counts.items():
+            terminal, completed = values.tolist()
             if completed:
                 result[f"Train/{name}_worlds_terminated_episode_rate"] = terminal / completed
                 result[f"Train/{name}_worlds_completed_episodes"] = completed
-        self.episode_group_counts = {"policy": [0, 0], "exploration": [0, 0]}
+        self.episode_group_counts = None
         return result
 
     def save(self) -> Path:

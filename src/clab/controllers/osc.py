@@ -12,6 +12,8 @@ import warp as wp
 from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
 from mjlab.utils.lab_api.math import apply_delta_pose, compute_pose_error
 
+from clab.cuda_graphs import graph_break
+
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
 
@@ -65,6 +67,29 @@ def limit_vector_norm(value: torch.Tensor, limit: float | None) -> torch.Tensor:
     return value * scale
 
 
+def _eigh(matrix: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.aten._linalg_eigh(matrix, "L", True)
+
+
+def _pinv_hermitian(matrix: torch.Tensor, rtol: float) -> torch.Tensor:
+    """``torch.linalg.pinv(matrix, rtol=rtol, hermitian=True)`` without host synchronizations.
+
+    The same eigendecomposition and thresholding as torch 2.9's linalg_pinv, bitwise;
+    ``aten._linalg_eigh`` skips ``linalg.eigh``'s host-side convergence check, which
+    synchronized twice per substep. cuSOLVER's batched eigendecomposition cannot be
+    captured on this driver, so a substep graph runs it eagerly between segments.
+    """
+    eigenvalues, vectors = graph_break(_eigh, matrix)
+    magnitude = eigenvalues.abs()
+    zero = matrix.new_zeros(())
+    tolerance = torch.maximum(
+        zero.unsqueeze(-1),
+        matrix.new_full((), rtol).unsqueeze(-1) * magnitude.amax(-1, keepdim=True),
+    )
+    inverse = torch.where(magnitude > tolerance, eigenvalues.reciprocal(), zero)
+    return torch.matmul(vectors * inverse.unsqueeze(-2), vectors.mH)
+
+
 def operational_space_torque(
     jacobian: torch.Tensor,
     mass: torch.Tensor,
@@ -106,7 +131,7 @@ def operational_space_torque(
     solution = torch.linalg.solve_ex(matrix, jac.transpose(-1, -2), check_errors=False).result
     inverse_inertia = jac @ solution
     inverse_inertia = (inverse_inertia + inverse_inertia.transpose(-1, -2)) / 2
-    inertia = torch.linalg.pinv(inverse_inertia, rtol=rcond, hermitian=True)
+    inertia = _pinv_hermitian(inverse_inertia, rcond)
     torque = jac.transpose(-1, -2) @ inertia @ acceleration.double().unsqueeze(-1)
     return torque.squeeze(-1).to(jacobian.dtype)
 
