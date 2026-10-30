@@ -11,6 +11,7 @@ category (see [tasks.md](tasks.md)). Each task has its own collector:
 
 ```bash
 clab resets collect --task box_in_bin --output banks/box_in_bin.pt --split train
+clab resets collect --task box_in_bin --output banks/box_in_bin_test.pt --split test --seed 7 --per-type 256
 clab resets collect --task drawer --output banks/drawer.pt --split train --per-type 2000
 ```
 
@@ -88,8 +89,8 @@ more than 1% of the worlds overflow at once.
 ```bash
 clab eval policy --task box_in_bin --algorithm supermimic \
   --checkpoint logs/supermimic/box_in_bin_s0/model_010000.pt \
-  --reset-bank banks/box_in_bin_eval.pt --episodes-per-type 64 --num-envs 64 \
-  --seeds 100000 --output reports/box_in_bin_s0.json
+  --reset-bank banks/box_in_bin_test.pt --episodes-per-type 64 --num-envs 64 \
+  --seeds 100000 --split-label held_out --output reports/box_in_bin_s0.json
 ```
 
 The evaluator loads only the actor and its frozen observation normalizer, rebuilds the

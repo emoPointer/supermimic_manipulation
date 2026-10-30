@@ -53,17 +53,80 @@ contacts or constraints: that world's transitions are excluded like diverged one
 resets (`Train/physics_overflow_world_steps`), and the run stops if more than 1% of the
 worlds overflow at once.
 
-The operational-space controller re-anchors at the current end-effector pose on every
-action, so it has no internal memory to model. The world model predicts only the physical
-increments (28-D, 30-D for Drawer); rotation increments are SO(3) tangent vectors.
+## World model
 
-| Task | Rollout state | Context | Actor | Critic input |
-| --- | --- | --- | --- | --- |
-| `box_in_bin` | 40 | 142 | 195 | rollout state + context + actor history |
-| `lemon` | 40 | 145 | 195 | same |
-| `square` | 40 | 145 | 195 | same |
-| `mug_hang` | 40 | 229 | 210 | same |
-| `drawer` | 55 | 161 | 265 | rollout state without its 13 process columns + context + actor history |
+The operational-space controller re-anchors at the current end-effector pose on every
+action, so it has no internal memory to model: the world model only needs the physical state
+of the arm and the object (and Drawer's slide).
+
+| Task | World-model input | Output | Rollout state | Context | Actor | Critic input |
+| --- | --- | --- | --- | --- | --- | --- |
+| `box_in_bin` | 180 | 28 | 40 | 142 | 195 | 377 |
+| `lemon` | 183 | 28 | 40 | 145 | 195 | 380 |
+| `square` | 183 | 28 | 40 | 145 | 195 | 380 |
+| `mug_hang` | 267 | 28 | 40 | 229 | 210 | 479 |
+| `drawer` | 201 | 30 | 55 | 161 | 265 | 468 |
+
+**Input** is the concatenation of three parts.
+
+| Part | Dims | Meaning |
+| --- | --- | --- |
+| `robot_q` | 8 | Joint positions: six arm joints (rad) and two finger joints (m) |
+| `robot_dq` | 8 | Joint velocities of the same joints |
+| `<object>_position` | 3 | Object position (m) in world axes, relative to the environment origin |
+| `<object>_rotation` | 6 | Object orientation as the first two columns of its rotation matrix (continuous, unlike quaternions or Euler angles) |
+| `<object>_velocity` | 6 | Object linear (m/s) and angular (rad/s) velocity in world axes |
+| `slide_q`, `slide_dq` | 1 + 1 | Drawer only: slide position (m) and velocity (m/s) |
+| Executed command | 7 | What the controller actually executes for the raw action: position offset (3, m) and rotation vector (3, rad) after the controller's clip, scaling and per-step norm bound, plus the commanded finger position (1, m: 0.002 closed, 0.044 open; binary forward, with a sigmoid straight-through gradient) |
+| Context | 142-229 | Constants of the episode, listed below |
+
+| Context field | Dims | Meaning |
+| --- | --- | --- |
+| `base_position`, `base_rotation` | 3 + 6 | Robot base pose |
+| `<target>_position`, `<target>_rotation` | 3 + 6 | Pose of the fixed target (bin, plate, peg, tree or drawer housing) |
+| `origin_z` | 1 | Height of the environment origin |
+| `gravity` | 3 | Gravity vector |
+| `body_mass` | 12 (BoxInBin, Lemon, MugHang) | Randomized masses of the 9 robot bodies, the object, the target and the table |
+| `body_inertia` | 36 (BoxInBin, Lemon, MugHang) | Their principal inertias (3 each) |
+| `geom_friction` | 48 / 51 / 135 (BoxInBin / Lemon / MugHang) | Sliding, torsional and rolling friction (3 each) of the 16 / 17 / 45 collision geoms of robot, object, target and table (MugHang's mug has 32 collision pieces) |
+| `dof_armature`, `dof_damping`, `dof_frictionloss` | 8 each | Joint armature, damping and dry friction of the 8 robot joints |
+
+Square and Drawer have the same fields over their own bodies, collision geoms and joints.
+Feeding the actual randomized physical parameters lets one model cover the domain
+randomization of training without having to infer it from history.
+
+**Output** (28) is the normalized increment of the physical state over one 0.05 s control
+step: `robot_q` 8, `robot_dq` 8, object position 3, object rotation 3 and object velocity 6
+(Drawer adds the slide, 30). The rotation increment is a world-axis rotation vector (the
+SO(3) tangent), `log(R_next R_prev⁻¹)`, integrated as `exp(δ) R_prev`; all other parts are
+added. Inputs and outputs are normalized with running means and standard deviations.
+
+**Analytic state** (9, not predicted) completes the 40-D rollout state: the previous raw
+action (7), the episode clock (1) and the success counter (1). They are advanced by rules,
+not learned. Drawer adds its 13 physical-sequence columns (55-D).
+
+| Network | Architecture | Parameters (BoxInBin) |
+| --- | --- | --- |
+| World model | MLP 5 × 2048, LayerNorm and SiLU, zero-initialized output layer | 17.2 M |
+| Actor | MLP 2048-1024-512-256, ELU; observation normalizer; no output squashing | 3.2 M |
+| Critic | MLP 256-128, ELU; input = rollout state + context + actor observation (Drawer: without the 13 process columns) | 0.13 M |
+
+**Training loss.** Windows of 8 consecutive steps are rolled out open-loop: each prediction
+is fed back as the next input. At every step the error between the predicted and the real
+state (as an output increment, with the rotation error as a rotation vector) is divided by the
+output standard deviation, floored at 1e-3 (1e-2 for joint positions, joint velocities and
+object velocity), squared and averaged. Steps after an episode end, and transitions from a
+world whose physics diverged, are masked.
+
+The actor observation (195 = 39 × 5 for BoxInBin, Lemon and Square, 210 = 42 × 5 for
+MugHang) holds five frames of: object pose in the target frame (6), previous action (7),
+joint positions (8), end-effector pose in the base frame (6), object pose in the
+end-effector frame (6) and target pose in the end-effector frame (6), poses as position plus
+axis-angle; MugHang adds the handle-to-hanging-point vector (3) and Drawer (265) the slide
+and its physical-sequence observation ([tasks.md](tasks.md)). In imagination these frames
+are rebuilt from the predicted state with differentiable forward kinematics and match the
+native observation to about 1e-6 on real states. The world model is a reduced surrogate,
+not an exact MuJoCo state.
 
 Drawer's actor and critic see its physical sequence only as the stage and the history the
 rest of the episode still depends on: each stage's references and counters during that stage
@@ -73,13 +136,6 @@ released in the drawer looks the same whether it was released in this episode or
 `PodReleasedInOpenDrawer` reset. With them observed, the critic valued a pod a
 `PodHeldAboveOpenDrawer` episode had just released at −1.8 and the same pod at that reset at
 +6, and the transport categories never learned to release it in the drawer.
-
-The world model sees the executed command: the action clipped to the controller input
-limit, scaled, and bounded in norm per step exactly as the OSC action does; the gripper is
-binary forward with a sigmoid straight-through gradient. Imagined actor observations are
-rebuilt from the imagined state with differentiable forward kinematics and match the native
-observation to about 1e-6 on real states. The world model is a reduced surrogate, not an
-exact MuJoCo state.
 
 ## Imagined reward and success
 

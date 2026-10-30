@@ -1,11 +1,12 @@
 # SuperMimic for robot manipulation
 
-This repository applies [SuperMimic](https://arxiv.org/abs/2610.28480), policy optimization by
-backpropagating the task return through a learned differentiable world model, to state-based
-robot manipulation in [mjlab](https://github.com/mujocolab/mjlab) (MuJoCo Warp). It contains
-five manipulation tasks for a simulated ARX5 arm, reset-bank collectors for
-[OmniReset](https://arxiv.org/abs/2603.15789)-style start categories, SuperMimic and a PPO
-baseline, and a complete-episode evaluator.
+This repository adapts [SuperMimic](https://arxiv.org/abs/2610.28480), policy optimization by
+backpropagating the task return through a learned differentiable world model, from humanoid
+motion tracking to state-based robot manipulation. Episodes start from
+[OmniReset](https://arxiv.org/abs/2603.15789)-style reset distributions. Everything runs in
+[mjlab](https://github.com/mujocolab/mjlab) (MuJoCo Warp) with a simulated ARX5 arm. It
+contains five manipulation tasks, their reset-bank collectors, SuperMimic and a PPO baseline,
+and a complete-episode evaluator.
 
 中文说明：[README.zh-CN.md](README.zh-CN.md)
 
@@ -41,9 +42,13 @@ episodes, Drawer's at 2× speed.
 ## Results
 
 Every number below is native task success (the simulator's own success test, held for
-0.5 s) from complete episodes with the deterministic actor, on a held-out reset bank
-collected with a different seed and split than the training bank: 64 episodes from each
-reset category. No episode was filtered.
+0.5 s) from complete episodes with the deterministic actor. No episode was filtered.
+
+**Held-out reset bank.** 64 episodes from each reset category, on a bank collected with a
+different seed and split than the training bank. Lemon, BoxInBin and MugHang use their
+checkpoints at 4,000 iterations, released on Hugging Face (below). Square and Drawer use, for
+the run in the clip, the checkpoint with the best training-bank success (32 episodes per
+category, every 2,000 iterations; ties go to the earlier one).
 
 | Task | Iterations | Training time | Overall | Per reset category |
 | --- | --- | --- | --- | --- |
@@ -53,10 +58,12 @@ reset category. No episode was filtered.
 | `square` | 16,000 | 10.5 h | **95.0%** | 95 / 98 / 91 / 97 / 94 |
 | `drawer` | 4,000 | 3.4 h | **90.2%** | 81 / 97 / 95 / 98 / 77 / 100 / 83 |
 
-- Lemon, BoxInBin and MugHang use the 4,000-iteration checkpoints released with the `main`
-  branch. Square and Drawer use, for the run in the clip, the checkpoint with the best
-  training-bank success (32 episodes per category, every 2,000 iterations; ties go to the
-  earlier one). The second seeds reached 93.8% (Square, 14,000 iterations) and 75.9%
+Training time is wall-clock time from launch to the checkpoint, including the first 1,000
+world-model-only iterations, on one GPU (see [Hardware](#hardware)). Runs shared their GPU
+with other jobs, so the times are upper bounds. The MugHang run was interrupted at
+iteration 1,000 and resumed from that checkpoint; its time includes both parts.
+
+- The second Square and Drawer seeds reached 93.8% (Square, 14,000 iterations) and 75.9%
   (Drawer, 8,000).
 - Drawer's success can vary strongly between checkpoints: the second seed scored 78, 24, 76
   and 69% at 4,000, 6,000, 8,000 and 10,000 iterations (the run above: 90, 90, 85 and 88%).
@@ -64,33 +71,194 @@ reset category. No episode was filtered.
   spread over all of them. With the default 10,000-iteration schedule the two seeds reached
   67 and 68% at 10,000 iterations. The run above was stopped at 16,200 iterations, once every
   category passed 90% on the training bank.
-- Training time is wall-clock time from launch to the checkpoint, including the first 1,000
-  world-model-only iterations, on one A100-SXM4-80GB. Runs shared their GPU with other jobs,
-  so the times are upper bounds.
-- Category 0 is the full task (object on the table, gripper free). Later categories start
-  part-way through it; the last Square and Drawer category is an open hand just above the
-  object (see [Square and Drawer](#square-and-drawer)).
+
+Category 0 is the full task (object on the table, gripper free); later categories start
+part-way through it (see [docs/tasks.md](docs/tasks.md)). The last Square and Drawer category
+is an open hand just above the object (see [Square and Drawer](#square-and-drawer)).
 
 **Data.** Each iteration collects 10,240 simulated transitions from 4,096 parallel worlds:
 41 M for the 4,000-iteration runs, Drawer's included (about 24 days of simulated time at
-20 Hz), and 164 M for Square (95 days). The policy is trained only through the
-world model: no policy-gradient (PPO) update is used. Training banks hold 10,000 start states
-per category (Square 9,999, Drawer 1,993), held-out banks 256 (Square and Drawer 255).
+20 Hz), and 164 M for Square (95 days). The policy is trained only through the world model:
+no policy-gradient (PPO) update is used. Training banks hold 10,000 start states per category
+(Square 9,999, Drawer 1,993), held-out banks 256 (Square and Drawer 255).
+
+## Hardware
+
+Every run uses one GPU of a single server:
+
+| Component | Configuration |
+| --- | --- |
+| GPU | 1 × NVIDIA A100-SXM4-80GB per run (driver 535.230, CUDA 12.2); about 27 GB of GPU memory per run (Square 29 GB, Drawer 45 GB) |
+| CPU | Intel Xeon Platinum 8336C (112 threads), shared by all jobs on the server |
+| Software | PyTorch 2.9.1 (CUDA 12.8 build), mjlab 1.5.3, MuJoCo 3.10, MuJoCo Warp, Warp 1.17 |
+| Simulation | 4,096 parallel worlds; CUDA graphs `--cuda-graph-mode plain` (Lemon, BoxInBin, MugHang) or `substeps` (Square, Drawer), both usable with drivers older than CUDA 12.4 |
+| Precision | BF16 autocast for the MLPs, FP32 parameters, TF32 matmuls |
+
+One iteration (collection, world-model updates and one actor/critic update) takes about
+1.4-3.5 s depending on the task and on GPU sharing.
+
+## Approach
+
+SuperMimic was introduced for humanoid motion tracking, where a dense tracking reward is
+available at every step. Manipulation is different: the decisive reward is a sparse success
+test that depends on contacts (the object is supported, released and at rest), and tasks are
+long compared with the 16 steps the policy can look ahead through the model. The adaptation
+has four parts.
+
+1. **Start states that cut the horizon (OmniReset).** Following OmniReset, each task has a
+   reset bank of physically validated start states in four categories: the full task (object
+   on the table, gripper free), the object grasped on the table, the object grasped in the
+   air, and the object grasped near the goal (Square and Drawer have more, see below).
+   Training samples the categories uniformly. Later categories put the success test within
+   reach of the short imagined rollouts, and the value learned there propagates back to the
+   full task. States are proposed procedurally (inverse kinematics for grasped states) and
+   kept only if they stay valid under the task's own physics and controller.
+
+2. **A world model of the physical state only.** The arm is driven by an operational-space
+   controller (OSC) that re-anchors at the current end-effector pose on every action, so it
+   has no internal memory. The world model predicts increments of the arm joints and the
+   object pose and velocity (28 numbers; Drawer adds its slide) from the executed controller
+   command, conditioned on
+   the episode's randomized physical parameters (every input and output dimension is listed in
+   [docs/supermimic.md](docs/supermimic.md#world-model)). Actor observations in imagination are
+   rebuilt from the predicted state with differentiable forward kinematics; on real states
+   they match the simulator's observations to about 1e-6.
+
+3. **Analytic rewards and a differentiable success test.** Rewards are not learned. They
+   are computed from the imagined state with the task's own weights. Contact-based success
+   tests are replaced by geometric surrogates (for example, both fingers opened past a
+   threshold instead of "no finger contact"). They are hard in the forward pass and use
+   sigmoid straight-through gradients backward, so the critic sees the true +10 success
+   value while the actor gets a usable gradient, scaled by 0.02 so that it does not dominate.
+   The 0.5 s hold is carried as an analytic counter.
+
+4. **Imagination-only shaping where the native reward has no gradient.** Once the object is
+   placed, reaching stops paying and opening the fingers is rewarded, so holding on is never
+   preferred to letting go. For MugHang the native threading term vanishes while the handle
+   is misaligned with the bar, so imagination adds a long-range pull of the handle toward the
+   hanging point. These terms exist only inside imagination; data collection, reported
+   rewards and every evaluation use the unmodified native task.
+
+Each iteration collects real transitions with the current actor plus Gaussian noise, fits
+the world model on 8-step open-loop windows, imagines 16 steps from replayed states,
+maximizes the imagined return plus a TD(λ) critic value by backpropagation through time,
+and fits the critic. The first 1,000 iterations train only the world model. Details:
+[docs/supermimic.md](docs/supermimic.md). Square and Drawer needed more; see
+[Square and Drawer](#square-and-drawer).
+
+## Install
+
+Requirements: Linux, an NVIDIA GPU, [uv](https://docs.astral.sh/uv/) and Git LFS.
+
+```bash
+git lfs pull
+uv sync --locked --extra dev
+source .venv/bin/activate        # or prefix every clab command with `uv run`
+clab --help
+```
+
+`--cuda-graph-mode plain` in the commands below is needed on NVIDIA drivers older than
+CUDA 12.4; newer drivers can drop it. Commands never overwrite existing outputs.
+
+## Released checkpoints and reset banks
+
+| Hugging Face repository | Content |
+| --- | --- |
+| [emopointer/supermimic-manipulation](https://huggingface.co/emopointer/supermimic-manipulation) | The Lemon, BoxInBin and MugHang checkpoints of the results table: `<task>/model_004000.pt` (world model, actor, critic and optimizer states) with the training settings in `<task>/params/` |
+| [emopointer/supermimic-manipulation-reset-banks](https://huggingface.co/datasets/emopointer/supermimic-manipulation-reset-banks) | Training banks `<task>_train.pt` (10,000 states per category) and held-out banks `<task>_test.pt` (256 per category) |
+
+`<task>` is `lemon`, `box_in_bin` or `mug_hang`. Download them with the Hugging Face CLI
+(run through `uvx`, so nothing is added to the environment):
+
+```bash
+uvx --from huggingface_hub hf download emopointer/supermimic-manipulation \
+  --local-dir checkpoints
+uvx --from huggingface_hub hf download emopointer/supermimic-manipulation-reset-banks \
+  --repo-type dataset --local-dir banks
+```
+
+Square and Drawer checkpoints and banks are not released;
+[Square and Drawer](#square-and-drawer) has the commands that collect, train and evaluate them.
+
+## Option A: start from the trained checkpoints
+
+Download both repositories as above, then evaluate a checkpoint on its held-out bank. This
+reproduces the results table (256 complete episodes, 64 per reset category):
+
+```bash
+TASK=box_in_bin        # lemon | box_in_bin | mug_hang
+clab eval policy --task $TASK --algorithm supermimic \
+  --checkpoint checkpoints/$TASK/model_004000.pt \
+  --reset-bank banks/${TASK}_test.pt --episodes-per-type 64 --num-envs 64 \
+  --seeds 100000 --split-label held_out --cuda-graph-mode plain \
+  --output reports/${TASK}_heldout.json
+```
+
+The report holds the overall and per-category success, episode lengths and returns; keep
+`checkpoints/$TASK/params/` next to the checkpoint, since evaluation checks the saved
+training environment against the current one.
+
+To keep training a released agent, resume from it. `--iterations` counts the additional
+iterations, so 6,000 more reach the default 10,000 in total. The world model, actor, critic,
+optimizers and iteration count are restored; the replay buffer is not saved, so it is
+refilled first:
+
+```bash
+clab train supermimic --task $TASK --reset-bank banks/${TASK}_train.pt \
+  --resume checkpoints/$TASK/model_004000.pt --iterations 6000 \
+  --output logs/supermimic/${TASK}_resumed --cuda-graph-mode plain
+```
+
+## Option B: train from scratch
+
+1. **Reset banks.** Collect a training bank and a held-out bank with a different seed and
+   split (or download the released banks as above and skip this step):
+
+   ```bash
+   TASK=box_in_bin        # lemon | box_in_bin | mug_hang
+   clab resets collect --task $TASK --output banks/${TASK}_train.pt --split train
+   clab resets collect --task $TASK --output banks/${TASK}_test.pt \
+     --split test --seed 7 --per-type 256
+   ```
+
+2. **Train.** The default budget is 10,000 iterations with a checkpoint every 1,000; the
+   results table uses `model_004000.pt`. The first 1,000 iterations fit only the world model.
+
+   ```bash
+   clab train supermimic --task $TASK --reset-bank banks/${TASK}_train.pt \
+     --output logs/supermimic/$TASK --seed 1 --cuda-graph-mode plain
+   ```
+
+   Progress is logged to TensorBoard (`tensorboard --logdir logs/supermimic`), including
+   the per-category success of the training episodes.
+
+3. **Evaluate** on the held-out bank:
+
+   ```bash
+   clab eval policy --task $TASK --algorithm supermimic \
+     --checkpoint logs/supermimic/$TASK/model_004000.pt \
+     --reset-bank banks/${TASK}_test.pt --episodes-per-type 64 --num-envs 64 \
+     --seeds 100000 --split-label held_out --cuda-graph-mode plain \
+     --output reports/${TASK}_heldout.json
+   ```
+
+Square and Drawer need other bank, training and evaluation settings; their commands are in
+[Square and Drawer](#square-and-drawer). A PPO baseline on the same environments is
+available as `clab train ppo` (see [docs/workflow.md](docs/workflow.md)).
 
 ## Tasks
 
-| Task | Goal | Horizon | Actor / critic | Reset categories |
+| Task | Goal | Horizon | Actor / critic inputs | Reset categories |
 | --- | --- | --- | --- | --- |
-| `box_in_bin` | Put a box in a bin, release it and let it rest | 16 s | 195 / 164 | 4 |
 | `lemon` | Put a lemon on a plate and release it | 32 s | 195 / 153 | 4 |
-| `square` | Thread a square nut onto its peg and release it | 16 s | 195 / 153 | 5 |
+| `box_in_bin` | Put a box in a bin, release it and let it rest | 16 s | 195 / 164 | 4 |
 | `mug_hang` | Hang a mug on a tree by its handle | 16 s | 210 / 240 | 4 |
+| `square` | Thread a square nut onto its peg and release it | 16 s | 195 / 153 | 5 |
 | `drawer` | Put a pod into an open drawer and push the drawer closed | 60 s | 265 / 74 | 7 |
 
-The arm is driven by an operational-space controller (OSC) at a 20 Hz policy rate and
-480 Hz physics. Every task uses the same 7-D action: a relative end-effector pose command in
-world axes plus a binary gripper command. Observations, rewards, success tests and reset
-categories are listed in [docs/tasks.md](docs/tasks.md).
+All tasks use the same 7-D action (a relative end-effector pose command in world axes plus a
+binary gripper command) at 20 Hz, with 480 Hz physics. Observations, rewards, success tests
+and reset categories are listed in [docs/tasks.md](docs/tasks.md).
 
 ## Square and Drawer
 
@@ -111,9 +279,9 @@ early. The reset bank holds six snapshots of each complete physical trajectory (
 table; grasped; lifted; held above the drawer; released inside; drawer half closed) and an
 open hand just above the resting pod.
 
-With only the shared adaptation ([docs/supermimic.md](docs/supermimic.md)), the full-task
-policy of both tasks closed its gripper on the first step and never opened it again, and
-the grasped starts let go at once. What they needed:
+With only the shared adaptation above, the full-task policy of both tasks closed its gripper
+on the first step and never opened it again, and the grasped starts let go at once. What they
+needed:
 
 - **A pre-grasp start category.** Nothing bridged the full task, with the gripper often half
   a metre away, and the first grasped category, so the critic never valued an open hand at
@@ -183,34 +351,6 @@ runs do not fit one 80 GB GPU. `--cuda-graph-mode substeps` replays each policy 
 physics substeps from CUDA graphs and is faster than `plain`
 ([docs/workflow.md](docs/workflow.md)). Results vary strongly between seeds.
 
-## Install
-
-Requirements: Linux, an NVIDIA GPU, [uv](https://docs.astral.sh/uv/) and Git LFS.
-
-```bash
-git lfs pull
-uv sync --locked --extra dev
-uv run clab --help
-```
-
-## Quick start
-
-Run inside the project environment (`source .venv/bin/activate`, or prefix with `uv run`).
-
-```bash
-clab tasks                                                     # tasks and their contracts
-clab resets collect --task box_in_bin --output banks/box_in_bin.pt
-clab train supermimic --task box_in_bin --reset-bank banks/box_in_bin.pt \
-  --output logs/supermimic/box_in_bin --cuda-graph-mode plain
-clab train ppo --task box_in_bin --reset-bank banks/box_in_bin.pt     # baseline
-clab eval policy --task box_in_bin --algorithm supermimic \
-  --checkpoint logs/supermimic/box_in_bin/model_010000.pt \
-  --reset-bank banks/box_in_bin.pt --output reports/box_in_bin.json
-```
-
-`--cuda-graph-mode plain` is needed on NVIDIA drivers older than CUDA 12.4. Commands never
-overwrite existing outputs.
-
 ## Documentation
 
 | Topic | Document |
@@ -233,9 +373,54 @@ src/clab/
 └── cli/                    # the clab command
 ```
 
-## Acknowledgements
+## References
 
-The SuperMimic implementation adapts [supermimic_vibed](https://github.com/zita-ch/supermimic_vibed)
-(MIT, see `src/clab/algorithms/supermimic/REFERENCE_LICENSE`). Task props follow
-[robosuite](https://github.com/ARISE-Initiative/robosuite) object models; their licence notices
-are kept next to the assets.
+This is an independent adaptation; it is not affiliated with the authors of either paper and
+does not reproduce their experiments.
+
+- **SuperMimic.** Q. Liao, Y. Shao, J. Long, K. Zakka, R. Horowitz, P. Abbeel and K. Sreenath.
+  *SuperMimic: Scaling Humanoid Whole-Body Control with One Differentiable World Model.*
+  [arXiv:2610.28480](https://arxiv.org/abs/2610.28480), 2026.
+  The implementation in `src/clab/algorithms/supermimic/` adapts the open-source
+  reimplementation [zita-ch/supermimic_vibed](https://github.com/zita-ch/supermimic_vibed)
+  (MIT; its license is kept in `src/clab/algorithms/supermimic/REFERENCE_LICENSE`).
+- **OmniReset.** P. Yin, T. Westenbroek, Z. Zhang, J. Tran, I. Dagnino, E. Shilamkar,
+  N. Mbiziwo-Tiapo, S. Bagaria, X. Liu, G. Mullins, A. Kolobov and A. Gupta.
+  *Emergent Dexterity via Diverse Resets and Large-Scale Reinforcement Learning.* ICLR 2026.
+  [arXiv:2603.15789](https://arxiv.org/abs/2603.15789),
+  [project page](https://weirdlabuw.github.io/omnireset/),
+  code: [UW-Lab/UWLab](https://github.com/UW-Lab/UWLab).
+  The reset categories here follow its reset distributions; the collectors are our own.
+
+```bibtex
+@article{liao2026supermimic,
+  title   = {SuperMimic: Scaling Humanoid Whole-Body Control with One Differentiable World Model},
+  author  = {Liao, Qiayuan and Shao, Yiyang and Long, Junfeng and Zakka, Kevin and
+             Horowitz, Roberto and Abbeel, Pieter and Sreenath, Koushil},
+  journal = {arXiv preprint arXiv:2610.28480},
+  year    = {2026}
+}
+
+@inproceedings{yin2026emergent,
+  title     = {Emergent Dexterity via Diverse Resets and Large-Scale Reinforcement Learning},
+  author    = {Yin, Patrick and Westenbroek, Tyler and Zhang, Zhengyu and Tran, Joshua and
+               Dagnino, Ignacio and Shilamkar, Eeshani and Mbiziwo-Tiapo, Numfor and
+               Bagaria, Simran and Liu, Xinlei and Mullins, Galen and Kolobov, Andrey and
+               Gupta, Abhishek},
+  booktitle = {The Fourteenth International Conference on Learning Representations},
+  year      = {2026},
+  url       = {https://arxiv.org/abs/2603.15789}
+}
+```
+
+Task props follow [robosuite](https://github.com/ARISE-Initiative/robosuite) object models;
+their license notices are kept next to the assets.
+
+## License
+
+The code is released under the [MIT License](LICENSE). Third-party code and assets keep their
+own licenses: the adapted supermimic_vibed code (MIT,
+`src/clab/algorithms/supermimic/REFERENCE_LICENSE`), the robosuite-derived props (MIT,
+`src/clab/tasks/lemon/assets/ROBOSUITE_LICENSE`), and the ShapeNet mug model used by MugHang,
+which is subject to the [ShapeNet terms of use](https://shapenet.org/terms) (non-commercial
+research and education).
