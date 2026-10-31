@@ -358,6 +358,7 @@ physics substeps from CUDA graphs and is faster than `plain`
 | Method, task adapters and options | [docs/supermimic.md](docs/supermimic.md) |
 | Tasks, success conditions and reset categories | [docs/tasks.md](docs/tasks.md) |
 | Reset banks, training and evaluation | [docs/workflow.md](docs/workflow.md) |
+| SuperMimic versus PPO and the reset-category ablation (in Chinese) | [docs/experiments.md](docs/experiments.md) |
 
 ## Layout
 

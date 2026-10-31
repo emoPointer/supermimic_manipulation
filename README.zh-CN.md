@@ -275,6 +275,7 @@ Drawer run。不同随机种子之间结果差异很大。
 | [docs/supermimic.md](docs/supermimic.md) | 方法、各任务适配器（想象中的奖励与成功判据）、训练选项 |
 | [docs/tasks.md](docs/tasks.md) | 五个任务的观测、奖励、成功条件和 reset 类别 |
 | [docs/workflow.md](docs/workflow.md) | reset bank 采集、训练与评估流程 |
+| [docs/experiments.md](docs/experiments.md) | SuperMimic 与 PPO 对比及消融实验报告 |
 
 ## 引用
 
